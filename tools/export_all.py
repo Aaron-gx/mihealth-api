@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""小米运动健康 全量健康数据导出 — 所有云端数据落盘 work/export/*.json"""
+"""小米运动健康 全量健康数据导出 — 所有云端数据落盘 tools/export/*.json（config.json 放仓库根目录）"""
 import json, os, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from mihealth_client import MiHealthClient, load_config
