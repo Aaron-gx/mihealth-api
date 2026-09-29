@@ -269,19 +269,23 @@ class MiHealthClient:
         raise ApiError(f"request failed after {retries + 1} tries: {last}")
 
     # -- public API ------------------------------------------------
-    def call(self, subpath, params, method="GET", decrypt=True, retries=None):
+    def call(self, subpath, params, method="GET", decrypt=True, retries=None, prefix=None):
         """One signed API call. Returns parsed JSON (decrypted) or the raw text.
+
+        `prefix` overrides the default `/app/v1/` (e.g. `prefix="healthapp/"` for
+        the FDS file service).
 
         On auth failure the optional `on_auth_error` hook runs (e.g. re-read
         credentials from the device) and the request is retried once with fresh
         credentials — the self-heal path.
         """
         retries = self.max_retries if retries is None else retries
+        pre = self.PREFIX if prefix is None else prefix   # "" / "healthapp/" for other services
         refreshed = False
         while True:
             nonce = gen_nonce(self.time_diff)
-            q = signed_encrypted(method, self.PREFIX + subpath, params, nonce, self.security)
-            url = self.base + self.PREFIX + subpath
+            q = signed_encrypted(method, pre + subpath, params, nonce, self.security)
+            url = self.base + pre + subpath
             r = self._send(method, url, q, retries)
 
             auth_problem = r.status_code in (401, 403)
@@ -476,6 +480,65 @@ class MiHealthClient:
                 on_page(batch, nwm, page)
             wm = nwm
         return dedup_items(items, key), last_good, True
+
+    # -- diet / weight-loss -----------------------------------------
+    def get_diet_records_by_time(self, start_sec, end_sec, dining=0, limit=100,
+                                 reverse=True, next_key=None, max_pages=50):
+        """饮食记录（返回 diet_records）。start/end 单位是秒；dining: 0=全部。"""
+        items, nk = [], None
+        for _ in range(max_pages):
+            d = {"start_time": start_sec, "end_time": end_sec, "dining": dining,
+                 "limit": limit, "reverse": reverse, "next_key": nk}
+            res = (self.call("data/get_diet_records_by_time",
+                             {"data": json.dumps(d, separators=(",", ":"))}) or {}).get("result") or {}
+            batch = res.get("diet_records") or []
+            for it in batch:
+                it.setdefault("_t", it.get("time"))
+            items += [it for it in batch if start_sec <= (it.get("time") or 0) <= end_sec]
+            nk = res.get("next_key")
+            if not res.get("has_more") or not nk:
+                break
+        return {"diet_records": items}
+
+    def get_diet_summary(self, start_sec, end_sec):
+        return self.call("statistics/batch_get_diet_summary",
+                         {"data": json.dumps({"start_time": start_sec, "end_time": end_sec},
+                                             separators=(",", ":"))})
+
+    # -- sport details / routes / files -----------------------------
+    def get_sport_operational_data(self, sid, key, start_time, end_time, locale="zh_cn"):
+        """单条运动扩展数据：route_info（轨迹引用）+ course_data（课程）。"""
+        d = {"sid": sid, "key": key, "start_time": start_time,
+             "end_time": end_time, "locale": locale}
+        return self.call("operate/get_sport_operational_data",
+                         {"data": json.dumps(d, separators=(",", ":"))})
+
+    def get_routes_list(self, start_time_ms=0, limit=50, reverse=True, origin_type=0,
+                        max_pages=20):
+        """轨迹库列表（用户保存的 GPS 轨迹）。"""
+        items, nk = [], None
+        for _ in range(max_pages):
+            d = {"start_time": start_time_ms, "next_key": nk, "limit": limit,
+                 "reverse": reverse, "origin_type": origin_type}
+            res = (self.call("running_route/get_user_routes_list",
+                             {"data": json.dumps(d, separators=(",", ":"))}) or {}).get("result") or {}
+            items += res.get("route_list") or []
+            nk = res.get("next_key")
+            if not res.get("has_more") or not nk:
+                break
+        return {"route_list": items}
+
+    def get_routes_info(self, route_ids):
+        return self.call("running_route/get_user_routes_info",
+                         {"data": json.dumps({"route_ids": route_ids}, separators=(",", ":"))})
+
+    def gen_fds_download_url(self, sid, items):
+        """生成 FDS 预签名下载 URL（轨迹文件/导出文件）。
+        items: [{"suffix": "csv"|"route"|..., "timeStamp": <sec>}]"""
+        return self.call("service/gen_download_url",
+                         {"data": json.dumps({"sid": sid, "items": items},
+                                             separators=(",", ":"))},
+                         prefix="healthapp/")
 
     # -- convenience ------------------------------------------------
     def get_fitness_data_by_watermark(self, phone_id="", water_mark=0, limit=None):

@@ -88,7 +88,7 @@ td.mono{font-variant-numeric:tabular-nums}
   </div>
 
   <div class="panel">
-    <h3>运动记录</h3>
+    <h3>运动记录 <select id="sportType" style="margin-left:10px;font-size:12px"><option value="">全部类型</option></select></h3>
     <table id="tSport">
       <thead><tr><th>时间</th><th>类型</th><th>时长</th><th>距离</th><th>卡路里</th><th>平均配速</th><th>平均心率</th></tr></thead>
       <tbody></tbody>
@@ -130,7 +130,7 @@ async function loadAll(){
     fetch('/api/overview').then(r=>r.json()),
     series('steps',hours),series('heart_rate',hours),series('spo2',hours),
     series('sleep',hours>720?720:168),
-    fetch(`/api/sport_records?days=${hours>=720?30:days_of(hours)}`).then(r=>r.json())
+    fetch(`/api/sport_records?days=${hours>=720?3650:days_of(hours)}${$('sportType').value?'&type='+$('sportType').value:''}`).then(r=>r.json())
   ]);
   if(ov.ok){$('upd').textContent='更新于 '+fmtDT(ov.ts);
     $('cnt').textContent=`本窗口数据点: 步数${ov.counts.steps} 心率${ov.counts.hr} 睡眠${ov.counts.sleep} 血氧${ov.counts.spo2}`;
@@ -205,7 +205,7 @@ function renderSport(pack){
   for(const s of items){
     tb.insertAdjacentHTML('beforeend',`<tr>
       <td class="mono">${fmtDT((s.start_time||s._t||0)*1000)}</td>
-      <td><span class="pill">${SPORT_CN[s.sport_type]||s._key||s.sport_type||'-'}</span></td>
+      <td><span class="pill">${SPORT_KEY_CN[s._key]||SPORT_CN[s.sport_type]||s._key||'-'}</span></td>
       <td>${dur(s.duration||((s.end_time||0)-(s.start_time||0)))}</td>
       <td class="mono">${s.distance?(s.distance>=1000?(s.distance/1000).toFixed(2)+' km':s.distance+' m'):'-'}</td>
       <td class="mono">${s.calories??'-'}</td>
@@ -241,8 +241,24 @@ $('sync').onclick=async()=>{
   }catch(e){}
   $('sync').textContent='同步';$('sync').disabled=false;
 };
+async function loadSportTypes(){
+  try{
+    const d=await (await fetch('/api/sport_types')).json();
+    const sel=$('sportType');
+    for(const t of (d.types||[])){
+      const o=document.createElement('option');
+      o.value=t.key; o.textContent=`${SPORT_KEY_CN[t.key]||t.key} (${t.count})`;
+      sel.appendChild(o);
+    }
+  }catch(e){}
+}
+const SPORT_KEY_CN={outdoor_running:'户外跑步',pool_swimming:'泳池游泳',outdoor_riding:'户外骑行',
+  outdoor_walking:'户外步行',outdoor_hiking:'户外徒步',football:'足球',badminton:'羽毛球',
+  frisbee:'飞盘',free_training:'自由训练',indoor_running:'室内跑步',jump_rope:'跳绳',walking:'步行'};
+$('sportType').onchange=loadAll;
 $('reload').onclick=loadAll;$('range').onchange=loadAll;
-loadHealth();loadAll();setInterval(()=>{loadHealth();loadAll();},300000);
+loadHealth();loadSportTypes();loadAll();
+setInterval(()=>{loadHealth();loadAll();},300000);
 </script>
 </body>
 </html>

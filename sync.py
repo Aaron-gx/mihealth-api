@@ -116,6 +116,11 @@ class Syncer:
             n = self._backfill_goals(start, now)
             log(f"  daily_goals: {n} rows")
 
+        # 3b) diet records (time-based only; the family has no watermark feed)
+        if ("diet" in (families or ()) ) or (keys and "diet" in keys):
+            n = self._backfill_diet(start, now)
+            log(f"  diet: {n} rows")
+
         # 4) seed watermark cursors so the next incremental run starts 'now'
         for fam, (_sub, _field, wtype) in WM_FAMILIES.items():
             try:
@@ -178,6 +183,19 @@ class Syncer:
         if stats["newest"]:
             self.db.set_state("ts_sport_sport_records", last_ts=stats["newest"])
         return stats["rows"], res.get("has_more")
+
+    def _backfill_diet(self, start_ms, end_ms):
+        """饮食记录（无水位流，只能按时间窗拉）。"""
+        c = self._client()
+        res = self._guard(c.get_diet_records_by_time, max(1, start_ms // 1000),
+                          end_ms // 1000)
+        rows = res.get("diet_records") or []
+        by_key, n = {}, 0
+        for it in rows:
+            by_key.setdefault(it.get("key") or "diet", []).append(it)
+        for k, batch in by_key.items():
+            n += self.db.upsert("diet", k, batch)
+        return n
 
     def _backfill_goals(self, start_ms, end_ms):
         c = self._client()
@@ -289,6 +307,12 @@ class Syncer:
             raise
         except Exception as e:
             log("  goals topup failed:", e)
+        try:
+            written += self._backfill_diet(max(1, start // 1000), now // 1000)
+        except SystemExit:
+            raise
+        except Exception as e:
+            log("  diet topup failed:", e)
         return written
 
     # ------------------------------------------------------------ reporting

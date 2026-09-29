@@ -26,9 +26,11 @@
 | 分钟级数据 | 步数、卡路里、心率、血氧、压力、强度活动、站立、耳机噪声 |
 | 周期数据 | 睡眠（深睡/浅睡/REM 分期）、PAI、VO2 Max、体重、经期 |
 | 医疗/项目 | ECG 等医疗记录、睡眠节律、睡眠日记 |
-| 运动 | 记录列表（配速/心率/轨迹）、汇总、类别表 |
+| 运动 | 记录（9 种类型）× 79 项跑步指标（跑姿/成绩预测/心率区间/训练负荷）、汇总、类别表 |
+| 饮食/体重管理 | 饮食记录、食物库、饮食建议、减重计划（接口已通，本账号无数据） |
 | 摘要 | 每日目标达成（步数/热量/活动/站立 达成率） |
-| 统计/增量 | `daily_fitness` 统计、watermark 增量锚点 |
+| 多维查询 | 按数据键 / 时间窗 / 数据源 / 运动类型 / 去重开关，服务端聚合与 CSV 导出 |
+| 统计/增量 | `daily_fitness` 统计、watermark 增量锚点与通用水位流 |
 | 其它 | 亲友数据、登录态刷新、第三方授权通道 |
 
 - 17 种数据键（CloudKey 全集）× 30+ 端点 × 全量历史翻页
@@ -107,7 +109,15 @@ adb shell su -c "sqlite3 /data/data/com.mi.health/app_webview/Default/Cookies \
 | `GET /api/sport_records?days=` `/api/sport_summary` | 运动记录/汇总 |
 | `GET /api/medical` `/api/project` `/api/stat/<key>` `/api/aggregated` | 医疗/项目/统计/聚合 |
 | `GET /api/watermark/<key>` `/api/max_watermark` | 增量锚点 |
+| `GET /api/watermark_feed/<family>?wm=` | 通用水位流（fitness/sport/medical/project） |
 | `GET /api/latest?keys=` `/api/relatives/<sub>` `/api/raw/<path>` `/api/keys` | 最新/亲友/透传/键表 |
+| `GET /api/families` | 数据清单：family/key 行数、时间范围、数据源 |
+| `GET /api/db/<family>` | **多维查询**：key × 时间窗 × 数据源 × 去重开关 × 排序 × 条数 |
+| `GET /api/agg/<family>/<key>` | **服务端聚合**：内层字段 × sum/max/min/avg × 任意桶宽 |
+| `GET /api/export.csv` | 任意族/键导出 CSV |
+| `GET /api/sport_types` · `/api/sport_records?type=` | 运动类型清单 / 按类型过滤 |
+| `GET /api/sport_detail` · `/api/routes` | 单条运动扩展数据（轨迹引用）/ GPS 轨迹库 |
+| `GET /api/diet?days=` | 饮食记录 |
 
 响应统一 `{ok, items, count, has_more}`。
 

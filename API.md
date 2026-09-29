@@ -306,7 +306,39 @@ base64 是纯文本、对行规则免疫；兜底方案是 `su -c cp` 到 `/data
 
 ---
 
-## 6. 本地网关 API（server.py，推荐项目直接对接）
+## 6. 附加数据族（实测补充）
+
+### 6.1 饮食 / 体重管理（`WeightApiService`）
+
+`diet_records` 走蛇形参数（`start_time`/`end_time` 单位**秒**）：
+
+| 端点 | 说明 |
+|---|---|
+| `data/get_diet_records_by_time` | 饮食记录，参数 `{start_time, end_time, dining(0=全部), limit, reverse, next_key}` |
+| `statistics/batch_get_diet_summary` | 饮食汇总（参数待校准，本账号返回 -8） |
+| `diet/food_list` `diet/food_detail` `diet/food_search` `diet/food_collect(_list/_cancel)` | 食物库/收藏 |
+| `diet/diet_advice` | 饮食建议 |
+| `plan/goal/weight_loss/{build,today,update,user/get,user/profile_set,estimate_date,estimate_weight}` | 减重计划 |
+| `data/delete_diet_records` · `data/up_diet_records` | 删除/上传 |
+
+### 6.2 其它已确认端点
+
+`data/last_achieved_goals`、`data/reoprt_achieved_goals`[sic]、`data/report_device_info`、
+`data/up_fitness_data`、`data/up_sport_records`、`data/up_medical_data`、`data/up_project_data`、
+`data/up_aggregated_fitness_data`、`data/up_third_raw_data`、`data/up_huami_raw_data`。
+
+### 6.3 未打通 / 受限项（如实记录）
+
+| 项 | 状态 |
+|---|---|
+| `healthapp/service/gen_download_url`（FDS 预签名下载） | 连接被服务端中断；疑需 App 上下文或额外头，未打通 |
+| `statistics/get_stat_data_by_time` | 参数已按 bean 对齐仍返回空集，账号无对应功能数据 |
+| `data/get_latest_fitness_data` | 参数待校准（返回 -8）；用 `by_time` 取最新一条即可 |
+| `pv.hlthopen.io.mi.com`（官方开放 API） | 需 OAuth client_id，非个人可用 |
+
+---
+
+## 7. 本地网关 API（server.py，推荐项目直接对接）
 
 启动：`python server.py` → `http://127.0.0.1:8567`
 默认**读本地 SQLite**（先跑 `python sync.py backfill`）；无库时自动回退实时接口。
@@ -315,6 +347,17 @@ base64 是纯文本、对行规则免疫；兜底方案是 `su -c cp` 到 `/data
 |---|---|
 | `GET /api/health` | 认证状态 + 存储模式 + 行数 |
 | `POST /api/sync` · `GET /api/sync/status` | 触发增量同步 / 查询进度（看板"同步"按钮用它） |
+| `GET /api/families` | **数据清单**：各 family/key 行数与时间范围 + 数据源（手表/手机/App 线） |
+| `GET /api/db/<family>` | **通用多维查询**：`?key=&start=&end=&sid=&dedup=0/1&order=&limit=&fields=meta` |
+| `GET /api/db/<family>/keys` | 该族有哪些 key 及行数、数据源 |
+| `GET /api/agg/<family>/<key>` | **服务端聚合**：`?field=<内层字段>&agg=sum\|max\|min\|avg\|count&bucket=<秒>&start=&end=&sid=` |
+| `GET /api/export.csv` | 任意族/键导出 CSV：`?family=&key=&start=&end=` |
+| `GET /api/sport_types` | 运动类型清单（含各类型条数） |
+| `GET /api/sport_detail` | 单条运动扩展数据（`route_info`/`course_data`）：`?sid=&key=&start=&end=`（秒） |
+| `GET /api/routes` · `/api/routes/info?ids=` | GPS 轨迹库列表 / 轨迹详情 |
+| `GET /api/diet?days=` | 饮食记录（库优先） |
+| `GET /api/watermark_feed/<family>?wm=` | 通用水位流（fitness\|sport\|medical\|project），walk 到最新 |
+| `GET /api/fds_url` | FDS 预签名下载（受限于 §6.3，未打通） |
 | `GET /api/overview` | 今日卡片（步数/热量/心率/血氧/最近睡眠/体重/PAI） |
 | `GET /api/series/<key>?hours=24` | 指定键时间序列（默认去重+按时间窗） |
 | `GET /api/fitness/<key>?start=0&end=<ms>` | **全量分钟级** fitness 数据（start<=0 → 翻页到底） |
@@ -335,6 +378,25 @@ base64 是纯文本、对行规则免疫；兜底方案是 `su -c cp` 到 `/data
 | `GET /` | 数据看板页面 |
 
 响应统一 `{ok,items|count,has_more}`；`has_more=true` 表示还有历史未拉完（加大 `pages` 或改用 watermark）。
+
+**多维组合示例**
+
+```bash
+# 某数据源（手表 ***REMOVED***）的步数·近 7 天·倒序
+/api/db/fitness?key=steps&sid=***REMOVED***&start=<ms>&order=desc&limit=100
+# 全历史每日步数合计（服务端聚合，不解码行）
+/api/agg/fitness/steps?field=steps&agg=sum&bucket=86400
+# 每周最高心率
+/api/agg/fitness/heart_rate?field=bpm&agg=max&bucket=604800
+# 只要元数据（时间/来源/键），不要 value 体
+/api/db/fitness?key=steps&fields=meta&limit=100000
+# 按运动类型过滤（中文名见看板下拉）
+/api/sport_records?days=3650&type=outdoor_running
+```
+
+**性能设计**：去重是**写入时维护的物化表**（`dedup`，主键 `family,key,ts`），
+原始行完整保留在 `records`。早期用视图实现时，SQLite 会对全表物化窗口函数——
+实测大数据读取 20~80s；改成物化表后同样的读取降到 0.5s 内，聚合走一次 SQL 不解码行。
 
 ---
 

@@ -256,13 +256,14 @@ def api_daily_goals():
 @app.route("/api/sport_records")
 def api_sport():
     days = int(request.args.get("days", 30))
+    stype = request.args.get("type")          # 运动类型过滤: outdoor_running / pool_swimming ...
     start = ms_now() - days * DAY
 
     def go():
         if _store is not None:
-            items = _store.rows("sport", None, start, ms_now())   # all sport types
-            if items or days >= 3650:
-                return {"ok": True, "items": items, "source": "db"}
+            items = _store.rows("sport", stype, start, ms_now())
+            if items or stype or days >= 3650:
+                return {"ok": True, "items": items, "type": stype, "source": "db"}
         for d in sorted({days, 90, 365, 3650}):
             res = client.get_sport_records_all(ms_now() - d * DAY, ms_now(),
                                                full_history=(d >= 3650))
@@ -287,7 +288,216 @@ def api_keys():
     return jsonify({"keys": ["steps", "calories", "heart_rate", "sleep", "spo2", "stress",
                              "pai", "weight", "energy", "vo2_max", "blood_pressure",
                              "blood_sugar", "valid_stand", "intensity", "menstruation",
-                             "headset", "goal"]})
+                             "headset", "goal"],
+                    "families": ["fitness", "sport", "diet", "goal", "medical", "project"]})
+
+
+# ---------- 通用多维查询（本地库） ----------
+@app.route("/api/families")
+def api_families():
+    """库内数据清单：family / key / 行数 / 时间范围 + 数据源。
+
+    全表分组约数秒，缓存 5 分钟（同步后会自动失效）。
+    """
+    if not _store:
+        return jsonify({"ok": False, "err": "no db (run sync.py backfill)"}), 404
+    return jsonify(cached("families", 5 * 60000, _families_payload))
+
+
+def _families_payload():
+    by_family = {}
+    for r in _store.stats(dedup=True):
+        f = by_family.setdefault(r["family"], {"family": r["family"], "rows": 0,
+                                               "first": r["first"], "last": r["last"], "keys": []})
+        f["rows"] += r["count"]
+        f["keys"].append({"key": r["key"], "count": r["count"],
+                          "first": r["first"], "last": r["last"]})
+        f["first"] = min(f["first"] or r["first"] or 0, r["first"] or f["first"] or 0)
+        f["last"] = max(f["last"] or 0, r["last"] or 0)
+    return {"ok": True,
+            "total_rows": _store.count(dedup=True),
+            "raw_rows": _store.count(),
+            "dedup": "materialized",
+            "families": list(by_family.values()),
+            "sources": _store.sources()}
+
+
+@app.route("/api/db/<family>")
+def api_db_family(family):
+    """任意数据族的多维查询。
+
+    ?key=     数据键/运动类型（可逗号分隔，省略=全部）
+    ?start=&end=  毫秒时间戳（或 seconds=1 表示秒）
+    ?sid=     只看某个数据源（手表/手机）
+    ?dedup=0  返回原始行（含各源重复），默认 1=去重
+    ?order=desc&limit=  倒序/条数上限
+    """
+    if not _store:
+        return jsonify({"ok": False, "err": "no db (run sync.py backfill)"}), 404
+    sec = request.args.get("seconds") == "1"
+    start, end = _ms("start"), _ms("end")
+    if sec:
+        start = start * 1000 if start is not None else None
+        end = end * 1000 if end is not None else None
+    keys = [k for k in (request.args.get("key") or "").split(",") if k]
+    dedup = request.args.get("dedup", "1") != "0"
+    order = request.args.get("order", "asc")
+    limit = _ms("limit")
+    sid = request.args.get("sid")
+    meta_only = request.args.get("fields") == "meta"
+    if keys:
+        # push the limit into SQL per key when a single key is requested;
+        # multi-key merges keep the caller's limit as a post-slice
+        per_key = limit if len(keys) == 1 else None
+        items = []
+        for k in keys:
+            items += _store.rows(family, k, start, end, dedup=dedup, sid=sid,
+                                 order=order, limit=per_key)
+        items.sort(key=lambda x: x.get("_t") or 0, reverse=(order == "desc"))
+        if limit:
+            items = items[:limit]
+    else:
+        items = _store.rows(family, None, start, end, dedup=dedup, sid=sid,
+                            order=order, limit=limit)
+    if meta_only:
+        items = [{k: v for k, v in it.items() if k.startswith("_")} for it in items]
+    return jsonify({"ok": True, "family": family, "count": len(items),
+                    "dedup": dedup, "items": items})
+
+
+@app.route("/api/db/<family>/keys")
+def api_db_keys(family):
+    if not _store:
+        return jsonify({"ok": False, "err": "no db"}), 404
+    return jsonify(cached(f"keys:{family}", 5 * 60000,
+                          lambda: {"ok": True, "family": family,
+                                   "keys": _store.keys_of(family),
+                                   "sources": _store.sources(family)}))
+
+
+@app.route("/api/agg/<family>/<key>")
+def api_agg(family, key):
+    """服务端聚合（不解码行，一次 SQL）：任意键 × 任意内层字段 × 任意桶宽。
+
+    ?field=steps&agg=sum|max|min|avg|count&bucket=3600&start=&end=&sid=&dedup=0|1
+    例：/api/agg/fitness/steps?field=steps&agg=sum&bucket=86400&start=...&end=...
+    """
+    if not _store:
+        return jsonify({"ok": False, "err": "no db"}), 404
+    field = request.args.get("field")
+    if not field:
+        return jsonify({"ok": False, "err": "need field=<inner json field>"}), 400
+    points = _store.aggregate(family, key, field,
+                              bucket_s=_ms("bucket", 3600),
+                              agg=request.args.get("agg", "sum"),
+                              start_ms=_ms("start"), end_ms=_ms("end"),
+                              sid=request.args.get("sid"),
+                              dedup=request.args.get("dedup", "1") != "0")
+    return jsonify({"ok": True, "family": family, "key": key, "field": field,
+                    "agg": request.args.get("agg", "sum"),
+                    "bucket": _ms("bucket", 3600), "count": len(points),
+                    "points": points})
+
+
+@app.route("/api/export.csv")
+def api_export_csv():
+    """任意族/键导出 CSV：/api/export.csv?family=fitness&key=steps&start=&end="""
+    if not _store:
+        return jsonify({"ok": False, "err": "no db"}), 404
+    import tempfile
+    family = request.args.get("family", "fitness")
+    key = request.args.get("key")
+    path = os.path.join(tempfile.gettempdir(), f"mih_export_{family}_{key or 'all'}.csv")
+    n = _store.to_csv(path, family, key, _ms("start"), _ms("end"),
+                      dedup=request.args.get("dedup", "1") != "0")
+    return send_from_directory(os.path.dirname(path), os.path.basename(path),
+                               as_attachment=True)
+
+
+@app.route("/api/sport_types")
+def api_sport_types():
+    """运动类型清单（库内实测有数据的）。"""
+    if _store:
+        return jsonify({"ok": True, "types": _store.keys_of("sport"),
+                        "sources": _store.sources("sport")})
+    return jsonify(call_paged("data/get_sport_records_by_time",
+                              lambda nk: {"startTime": 1, "endTime": ms_now(),
+                                          "next_key": nk, "limit": 100, "reverse": True},
+                              "sport_records", max_pages=1))
+
+
+@app.route("/api/sport_detail")
+def api_sport_detail():
+    """单条运动扩展数据（轨迹引用 route_info / 课程 course_data）。
+    ?sid=&key=outdoor_running&start=&end=（秒）"""
+    sid = request.args.get("sid")
+    key = request.args.get("key")
+    start = _ms("start"); end = _ms("end")
+    if not (sid and key and start and end):
+        return jsonify({"ok": False, "err": "need sid,key,start,end (seconds)"}), 400
+    return jsonify(client.get_sport_operational_data(sid, key, start, end))
+
+
+@app.route("/api/routes")
+def api_routes():
+    """轨迹库（GPS 轨迹列表）。?start=<ms>&limit=&origin_type="""
+    start = _ms("start", 0)
+    limit = _ms("limit", 50)
+    ot = _ms("origin_type", 0)
+    return jsonify(client.get_routes_list(start, limit, True, ot))
+
+
+@app.route("/api/routes/info")
+def api_routes_info():
+    ids = [i for i in (request.args.get("ids") or "").split(",") if i]
+    if not ids:
+        return jsonify({"ok": False, "err": "need ids=route_id,..."}), 400
+    return jsonify(client.get_routes_info(ids))
+
+
+@app.route("/api/fds_url")
+def api_fds_url():
+    """FDS 预签名下载 URL。?sid=<数据源id>&suffix=csv|route&time=<秒>"""
+    items = []
+    for suffix in (request.args.get("suffix") or "csv").split(","):
+        items.append({"suffix": suffix, "timeStamp": _ms("time", int(time.time()))})
+    return jsonify(client.gen_fds_download_url(request.args.get("sid") or "", items))
+
+
+@app.route("/api/diet")
+def api_diet():
+    """饮食记录（秒级时间窗）。本地库优先，未同步时走实时。"""
+    days = int(request.args.get("days", 30))
+    start_ms = ms_now() - days * DAY
+    if _store:
+        items = _store.rows("diet", None, start_ms, ms_now())
+        return jsonify({"ok": True, "items": items, "source": "db", "count": len(items)})
+    res = client.get_diet_records_by_time(start_ms // 1000, ms_now() // 1000)
+    return jsonify({"ok": True, "items": res["diet_records"], "source": "live"})
+
+
+@app.route("/api/watermark_feed/<family>")
+def api_watermark_feed(family):
+    """通用水位流：?wm=<游标>，walk 到最新。
+    family: fitness | sport | medical | project"""
+    import sync as _sync
+    spec = {
+        "fitness": ("data/get_fitness_data_by_watermark", "data_list", 0),
+        "sport": ("data/get_sport_records_by_watermark", "sport_records", 1),
+        "medical": ("data/get_medical_data_by_watermark", "data_list", 5),
+        "project": ("data/get_project_data_by_watermark", "data_list", 4),
+    }.get(family)
+    if not spec:
+        return jsonify({"ok": False, "err": "unknown family"}), 400
+    sub, field, wtype = spec
+    wm = _ms("wm")
+    if not wm:
+        return jsonify({"ok": True, "cursor": client.get_max_watermark(wtype),
+                        "items": [], "note": "no wm given: cursor seeded at head"})
+    items, new_wm, more = client.sync_by_watermark(sub, field, wm,
+                                                   max_pages=_ms("pages", 50))
+    return jsonify({"ok": True, "cursor": new_wm, "count": len(items),
+                    "has_more": more, "items": items})
 
 
 # ---------------------------------------------------------------- live passthrough
