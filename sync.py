@@ -152,6 +152,17 @@ class Syncer:
             self.db.set_state(f"ts_fitness_{key}", last_ts=stats["newest"])
         return stats["rows"], res.get("has_more")
 
+    def _upsert_sport(self, batch):
+        """Sport rows keep their own key (outdoor_running, swimming, ...) so the
+        record type survives storage and queries can filter per sport."""
+        by_key = {}
+        for it in batch:
+            by_key.setdefault(it.get("key") or "unknown", []).append(it)
+        n = 0
+        for k, rows in by_key.items():
+            n += self.db.upsert("sport", k, rows)
+        return n
+
     def _backfill_sport(self, start_ms, end_ms):
         c = self._client()
         stats = {"rows": 0, "newest": 0}
@@ -159,7 +170,7 @@ class Syncer:
         def on_page(batch, _nk, _page):
             if not batch:
                 return
-            stats["rows"] += self.db.upsert("sport", "sport_records", batch)
+            stats["rows"] += self._upsert_sport(batch)
             stats["newest"] = max(stats["newest"], max((x.get("_t") or 0) for x in batch))
 
         res = self._guard(c.get_sport_records_all, start_ms, end_ms,
@@ -203,7 +214,7 @@ class Syncer:
             stats["pages"] = page + 1
             if batch:
                 if fam == "sport":
-                    stats["rows"] += self.db.upsert("sport", "sport_records", batch)
+                    stats["rows"] += self._upsert_sport(batch)
                 else:  # fitness feed is key-mixed
                     by_key = {}
                     for it in batch:
@@ -262,7 +273,7 @@ class Syncer:
 
             def on_sport_page(batch, _nk, _page):
                 if batch:
-                    sp["rows"] += self.db.upsert("sport", "sport_records", batch)
+                    sp["rows"] += self._upsert_sport(batch)
 
             self._guard(c.get_sport_records_all, start, now, max_pages=50,
                         on_page=on_sport_page)

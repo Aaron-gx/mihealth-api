@@ -389,16 +389,23 @@ class MiHealthClient:
             stop_below_start=not full_history, key=key, on_page=on_page)
         return {"data_list": items, "has_more": more}
 
-    def get_sport_records_by_time(self, start_ms, end_ms, next_key=None, limit=50):
-        data = {"startTime": start_ms, "endTime": end_ms, "next_key": next_key, "limit": limit}
+    def get_sport_records_by_time(self, start_ms, end_ms, next_key=None, limit=50,
+                                  reverse=True, category=None):
+        # reverse=True is required for windowed queries: sport records are sparse
+        # and ascending order returns the oldest page first, which makes the
+        # "page older than window" stop rule fire immediately.
+        data = {"startTime": start_ms, "endTime": end_ms, "next_key": next_key,
+                "limit": limit, "reverse": reverse}
+        if category:
+            data["category"] = category
         return self.call("data/get_sport_records_by_time",
                          {"data": json.dumps(data, separators=(",", ":"))})
 
     def get_sport_records_all(self, start_ms, end_ms, max_pages=200, limit=50,
-                              full_history=False, on_page=None):
+                              full_history=False, on_page=None, reverse=True):
         api_start = max(start_ms, end_ms - 86400000)
         items, more = self._paged_all(
-            lambda nk: self.get_sport_records_by_time(api_start, end_ms, nk, limit),
+            lambda nk: self.get_sport_records_by_time(api_start, end_ms, nk, limit, reverse),
             "sport_records", start_ms, end_ms, max_pages,
             stop_below_start=not full_history, on_page=on_page)
         return {"sport_records": items, "has_more": more}

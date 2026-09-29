@@ -260,9 +260,7 @@ def api_sport():
 
     def go():
         if _store is not None:
-            items = _store.rows("sport", "sport_records", start, ms_now())
-            for it in items:
-                it.setdefault("_key", it.get("key") or "sport")
+            items = _store.rows("sport", None, start, ms_now())   # all sport types
             if items or days >= 3650:
                 return {"ok": True, "items": items, "source": "db"}
         for d in sorted({days, 90, 365, 3650}):

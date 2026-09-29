@@ -168,6 +168,7 @@ class Store:
                 obj = {}
             obj["_t"] = ts
             obj["_sid"] = sid
+            obj["_key"] = k          # record's own key (sport type, data key, ...)
             out.append(obj)
         return out
 

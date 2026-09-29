@@ -231,6 +231,34 @@ sport_records 项：
 翻页的一个补充规则（实测）：稀疏数据类型（steps/intensity）单页可跨数周，因此"整页早于窗口即停页"
 的判据要加上"已持有窗口内记录"的前置条件，否则会把窗口截短。
 
+### 4.5.2 单条运动明细 / 轨迹（实测）
+
+| 端点 | 参数（`data`） | 说明 |
+|---|---|---|
+| `operate/get_sport_operational_data` | `{sid, key, start_time, end_time, locale}` | 单条运动的扩展数据：`route_info`（轨迹引用）+ `course_data`（课程） |
+| `running_route/get_user_routes_list` | `{start_time, next_key, limit, reverse, origin_type}` | 轨迹库列表（`route_list`），`start_time` 单位是 **ms** |
+| `running_route/get_user_routes_info` | `{route_ids: [...]}` | 轨迹详情（含 FDS 文件引用） |
+| `healthapp/service/gen_download_url` | 见 `FDSRequestParam`（`items`, `sid`） | 生成 FDS 预签名下载 URL（轨迹/导出文件走这里） |
+
+`key` 必须是记录自身的运动类型（`outdoor_running` / `pool_swimming` …），
+`start_time`/`end_time` 取该记录 `value` 里的同名字段（秒），缺一即 `invalid params`。
+
+**GPS 轨迹不在运动记录里**：记录 `value` 的 79 个字段（跑步）全是汇总指标，无坐标；
+单条轨迹经 `route_info.file`（FDS 对象）或轨迹库 `route_id` 获取。实测本账号
+52 条记录 `route_info` 全为 null、轨迹库 0 条 —— 云端确实没有存轨迹数据。
+
+### 4.5.3 运动记录可用字段（跑步为例，79 个）
+
+汇总：`distance/duration/calories/total_cal/recover_time/train_effect/train_load*/vitality`
+跑姿：`avg_cadence/avg_stride/avg_vertical_amplitude/avg_vertical_stride_ratio/
+avg_touchdown_duration/avg_touchdown_air_ratio/forefoot_landing_duration/
+heel_landing_duration/golpe_landing_duration/max_contact_time`
+预测：`five_kilometre/half_marathon/full_marathon_grade_prediction_duration`、`running_ability_index/level`
+心率区间：`hrm_warm_up/fat_burning/aerobic/anaerobic/extreme_duration`、`reserve_hr_zone`
+其它：`vo2_max(+level)`、`training_experience`、`training_status`、`highlight_events`、
+`cloud_course_id/designated_course`（课程绑定）、`rise/fall/max/min/avg_height`
+游泳另有 `avg_swolf/best_swolf/avg_stroke_freq/turn_count/pool_width/valid_duration`。
+
 ### 4.6 亲友（relatives）
 
 `relatives/get_fitness_data`、`relatives/get_latest_data`、`relatives/get_aggregated_data`
