@@ -2,10 +2,18 @@
 
 小米运动健康（`com.mi.health`，Mi Fitness）云端健康数据 API — 逆向实现。
 
-通过还原 App 内部接口的认证与加密协议（`ssecurity` + `nonce` → SHA256 → RC4-drop1024），调用 `hlth.io.mi.com` 获取个人健康数据。
+通过还原 App 内部接口的认证与加密协议，调用其云端服务获取个人健康数据。
 
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.9%2B-blue)](#)
+
+## 用途
+
+为需要访问**本人**小米运动健康云端数据的场景提供可编程通道：个人数据备份与导出、接入自建项目/仪表板、与第三方工具（Home Assistant、Obsidian、Grafana 等）做数据集成、接口逆向研究与学习。
+
+- 仅供访问**使用者自己账号**名下的数据；需先在登录态设备上提取凭据（见下文）
+- 与小米公司无任何关联，不是官方开放 API（官方通道为 `pv.hlthopen.io.mi.com`，需注册 OAuth client_id）
+- 请遵守适用法律与平台条款使用
 
 ![dashboard](static/screenshot.png)
 
