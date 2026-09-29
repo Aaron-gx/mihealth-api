@@ -1,2 +1,3 @@
 requests>=2.31
 flask>=3.0
+pycryptodome>=3.20   # 可选：RC4 C 加速（缺失时自动回退纯 Python 实现）

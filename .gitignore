@@ -1,5 +1,11 @@
 config.json
+config.local.json
 export/
+*.db
+*.db-wal
+*.db-shm
+test_*.json
+test_*.db*
 *.pyc
 __pycache__/
 .DS_Store

@@ -202,6 +202,35 @@ sport_records 项：
 
 本地网关路由：`GET /api/daily_goals?days=14` → 已解析为按日 `goals{steps,calories,active_minutes,stand_hours}`（带去重）。
 
+### 4.5.1 增量同步：水位变更流（实测语义）
+
+每个数据族有**独立**的向前推进式变更流端点，核心参数只有一个 `waterMark`（`phoneId` 可省）：
+
+| 族 | 端点 | 列表字段 | 批次上限 |
+|---|---|---|---|
+| fitness | `data/get_fitness_data_by_watermark` | `data_list` | 502 |
+| sport | `data/get_sport_records_by_watermark` | `sport_records` | 100 |
+| medical | `data/get_medical_data_by_watermark` | `data_list` | — |
+| project | `data/get_project_data_by_watermark` | `data_list` | — |
+| aggregated | `data/get_aggregated_fitness_data_by_watermark` | `data_list` | 参数名是 `wm` 而非 `waterMark` |
+
+行为（实测要点）：
+
+- 响应 `{data_list, watermark, has_more}`；**返回的 `watermark` 就是下一次要传的游标**
+- `waterMark=0` 是"寻位"：返回该流**起点水位**且列表为空，需再用该水位请求一次才拿到数据
+- **空页正常**：会出现 `data_list: []` 但 `watermark` 前进的批次（删除记录/占位）
+- `limit` 参数**不生效**（fitness 恒 502/页，sport 恒 100/页）
+- 推进到 `has_more=false` 即追平；把最终水位落库，下次从它继续 → 增量通常个位数请求
+
+`data/get_max_watermark?type=N` 取当前最新水位（`0=FITNESS_DATA 1=SPORT_RECORD 2=RED_DOT 3=RAINBOW 4=DAILY 5=MEDICAL`），
+用于首次回填后**播种游标**（否则下一轮会把历史重拉一遍）。
+
+> 全量回填不要走水位流：从流起点推进到最新需上万次请求（水位跨度与记录数不成比例）。
+> 时间窗 + `next_key` 翻页更划算。本仓库 `sync.py` 即此策略：**回填用时间、增量用水位**。
+
+翻页的一个补充规则（实测）：稀疏数据类型（steps/intensity）单页可跨数周，因此"整页早于窗口即停页"
+的判据要加上"已持有窗口内记录"的前置条件，否则会把窗口截短。
+
 ### 4.6 亲友（relatives）
 
 `relatives/get_fitness_data`、`relatives/get_latest_data`、`relatives/get_aggregated_data`
@@ -226,20 +255,38 @@ sport_records 项：
 2. 用 `sts-hlth.io.mi.com` 行 `serviceToken`、`cUserId` + `.wear.mi.com.internal.yrn.net` 行 `ssecurity` 更新配置。
 3. 不建议拿 `.hlth.io.mi.com` 行的 `serviceToken`（那是 sid 标记）。
 
-### 5.2 实现注意
+### 5.2 adb 自动重取（`tools/refresh_credentials.py`，实测坑）
+
+`adb exec-out su -c "cat <file>"` **不能用**：`su` 会把命令放进 pty 执行，终端行规则把文件里的
+`\n` 改写成 `\r\n`——36864 字节的 SQLite 文件会到达 36887 字节、页边界错位，SQLite 报
+`database disk image is malformed`。正确姿势：
+
+```bash
+adb exec-out su -c "base64 /data/data/com.mi.health/app_webview/Default/Cookies"   # 本地 b64decode
+```
+
+base64 是纯文本、对行规则免疫；兜底方案是 `su -c cp` 到 `/data/local/tmp` 再 `adb pull`（二进制安全）。
+脚本还做了尺寸规整：定位 `SQLite format 3\0` 魔数、按头部 `page_size × page_count` 截断。
+
+### 5.3 实现注意
 
 - `ssecurity` 在 token 轮换时可能变；若大量 401 先重提取 ssecurity
 - `_nonce` 需要时钟同步；客户端与服务器时差靠 `getServiceToken` 返回的 `timeDiff` 校正（外部实现用本地即可，nonce 有效性以分钟计，偏差容忍大）
 - RC4 drop-1024 是必需（`o0l` 构造函数丢弃 `o0l.b=1024B`）
+- 401 自愈：客户端在鉴权失败时调用 `on_auth_error` 钩子（重取凭据→`reload_credentials`），
+  成功后**自动重试当次请求**；注意重建 client 的代码要重新读配置文件，否则会拿着旧凭据继续失败
 
 ---
 
-## 6. 本地网关 API（work/web/server.py，推荐项目直接对接）
+## 6. 本地网关 API（server.py，推荐项目直接对接）
 
-启动：`E:\Software\apkrev-venv\Scripts\python.exe work\web\server.py` → `http://127.0.0.1:8567`
+启动：`python server.py` → `http://127.0.0.1:8567`
+默认**读本地 SQLite**（先跑 `python sync.py backfill`）；无库时自动回退实时接口。
 
 | 路由 | 说明 |
 |---|---|
+| `GET /api/health` | 认证状态 + 存储模式 + 行数 |
+| `POST /api/sync` · `GET /api/sync/status` | 触发增量同步 / 查询进度（看板"同步"按钮用它） |
 | `GET /api/overview` | 今日卡片（步数/热量/心率/血氧/最近睡眠/体重/PAI） |
 | `GET /api/series/<key>?hours=24` | 指定键时间序列（默认去重+按时间窗） |
 | `GET /api/fitness/<key>?start=0&end=<ms>` | **全量分钟级** fitness 数据（start<=0 → 翻页到底） |
@@ -263,9 +310,20 @@ sport_records 项：
 
 ---
 
-## 7. Python 客户端（work/mihealth_client.py）
+## 7. Python 客户端（mihealth_client.py）
 
 ```python
+from mihealth_client import MiHealthClient, load_config, client_from_config
+cfg = load_config()                       # config.json > 环境变量 MIH_*
+C = client_from_config(cfg)               # 含区域/限流/重试/401 钩子
+
+# 增量：水位流（返回 items, 最新水位, has_more）
+items, wm, more = C.sync_by_watermark("data/get_fitness_data_by_watermark", "data_list", start_wm)
+wm_now = C.get_max_watermark(0)           # 播种游标
+```
+
+```python
+# 旧式直连（保留兼容）
 from mihealth_client import MiHealthClient
 C = MiHealthClient(SSECURITY, SERVICE_TOKEN, CUSER_ID)
 

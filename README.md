@@ -38,20 +38,41 @@
 ## 快速开始
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt          # pycryptodome 可选：RC4 提速 ~40x
 
-# 放入凭据（提取方法见 API.md §1）
+# 放入凭据（提取方法见 API.md §1；有 root 设备也可自动抓取）
 cp config.example.json config.json
+python tools/refresh_credentials.py       # 自动从设备读取并写回 config.json
 
-# 命令行试跑
-python mihealth_client.py
+# 1) 首次全量回填 → SQLite（17 个数据键 + 运动记录 + 每日摘要）
+python sync.py backfill
 
-# HTTP 网关 + 看板 → http://127.0.0.1:8567
+# 2) 之后定时增量（水位流 + 时间窗补拉，通常只需个位数请求）
+python sync.py incremental
+python sync.py status                     # 游标与库内行数
+
+# 3) HTTP 网关 + 看板 → http://127.0.0.1:8567（默认读本地库，无库时走实时接口）
 python server.py
 
-# （可选）全量导出 → export/*.json
-python tools/export_all.py
+# 其它
+python mihealth_client.py                 # 客户端冒烟
+python sync.py export --family fitness --key steps --csv steps.csv
+python tools/export_all.py                # 全量导出 JSON（不落库）
 ```
+
+### 同步与存储
+
+| 能力 | 说明 |
+|---|---|
+| 全量回填 | 按时间窗 + `next_key` 游标翻页拉全历史，4 线程并发（`--workers`） |
+| 增量同步 | 走**水位变更流**（fitness / sport 各一条，族内向前推进），游标持久化，逐页落库 |
+| 时间窗补拉 | 增量时同时补拉最近 `--hours`（默认 72h），修复断档 |
+| 去重 | 分页重叠与多数据源（手表/手机）在**查询视图** `v_dedup` 收敛为每分钟一条 |
+| 限流 | `--min-interval` 控制请求间隔（默认 0.4s），避免触发风控 |
+| 断点续传 | 游标每页落库，中断不丢进度；`INSERT OR REPLACE` 保证重跑幂等 |
+| 401 自愈 | 检测到鉴权失败自动调用 `tools/refresh_credentials.py` 重取凭据并**重试当次请求** |
+
+数据库表：`records`（原始行，主键 `family+key+sid+ts`）、`v_dedup`（去重视图）、`sync_state`（游标）。
 
 ## 凭据提取
 
@@ -76,7 +97,9 @@ adb shell su -c "sqlite3 /data/data/com.mi.health/app_webview/Default/Cookies \
 
 | 路由 | 说明 |
 |---|---|
-| `GET /` | 数据看板 |
+| `GET /` | 数据看板（含"同步"按钮） |
+| `GET /api/health` | 认证状态 + 存储模式 + 行数 |
+| `POST /api/sync` · `GET /api/sync/status` | 触发增量同步 / 查询进度 |
 | `GET /api/overview` | 今日摘要 |
 | `GET /api/series/<key>?hours=24` | 指定键时间序列 |
 | `GET /api/fitness/<key>?start=&end=` | 分钟级数据，`start<=0` 拉全量 |
@@ -120,10 +143,15 @@ Cookie: cUserId=...; serviceToken=<长token>; locale=zh_cn
 ## 目录
 
 ```
-mihealth_client.py   # Python 客户端 + crypto
-server.py            # Flask HTTP 网关（看板 + REST 代理）
+mihealth_client.py   # Python 客户端 + crypto（重试/限流/去重/水位/区域）
+store.py             # SQLite 存储层（幂等 upsert + v_dedup 视图 + 游标）
+sync.py              # 同步编排器：backfill / incremental / status / export
+server.py            # Flask HTTP 网关（看板 + REST 代理，库优先·实时回退）
 static/              # index.html + Chart.js + screenshot.png
-tools/               # export_all.py / dump_tokens.js (Frida hook)
+tools/
+  refresh_credentials.py  # adb 自动重取凭据（base64 传输避开 pty 污染）
+  export_all.py           # 全量导出 JSON
+  dump_tokens.js          # Frida hook 现场抓 token
 API.md               # 接口文档
 RECON.md             # 逆向侦查记录
 config.example.json  # 凭据模板

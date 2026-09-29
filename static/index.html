@@ -41,6 +41,7 @@ td.mono{font-variant-numeric:tabular-nums}
 <header>
   <h1>小米运动健康 · 数据看板</h1>
   <span class="sub" id="upd"></span>
+  <span class="sub" id="mode"></span>
   <span class="sp"></span>
   <select id="range">
     <option value="24">近 24 小时</option>
@@ -48,6 +49,7 @@ td.mono{font-variant-numeric:tabular-nums}
     <option value="168" selected>近 7 天</option>
     <option value="720">近 30 天</option>
   </select>
+  <button id="sync">同步</button>
   <button id="reload">刷新</button>
 </header>
 <div class="wrap">
@@ -211,8 +213,36 @@ function renderSport(pack){
       <td class="mono">${s.avg_hrm??'-'}</td></tr>`);
   }
 }
+async function loadHealth(){
+  try{
+    const h=await (await fetch('/api/health')).json();
+    const parts=[h.mode==='db'?'数据源: 本地库':'数据源: 实时接口'];
+    if(h.rows!=null) parts.push(h.rows.toLocaleString()+' 行');
+    parts.push('认证: '+({ok:'正常',expired:'已过期',error:'异常'}[h.auth]||h.auth||'-'));
+    $('mode').textContent=parts.join(' · ');
+    $('mode').style.color=(h.auth==='ok')?'':'#d97706';
+  }catch(e){$('mode').textContent='状态不可用';}
+}
+$('sync').onclick=async()=>{
+  $('sync').disabled=true;$('sync').textContent='同步中…';
+  try{
+    await fetch('/api/sync',{method:'POST'});
+    for(let i=0;i<160;i++){
+      await new Promise(r=>setTimeout(r,3000));
+      const s=await (await fetch('/api/sync/status')).json();
+      if(!s.running){
+        $('sync').textContent='同步';$('sync').disabled=false;
+        $('upd').textContent=(s.result&&s.result.ok)
+          ?('同步完成，写入 '+s.result.rows+' 行')
+          :('同步失败：'+((s.result||{}).err||'未知'));
+        await loadHealth();await loadAll();return;
+      }
+    }
+  }catch(e){}
+  $('sync').textContent='同步';$('sync').disabled=false;
+};
 $('reload').onclick=loadAll;$('range').onchange=loadAll;
-loadAll();setInterval(loadAll,300000);
+loadHealth();loadAll();setInterval(()=>{loadHealth();loadAll();},300000);
 </script>
 </body>
 </html>
