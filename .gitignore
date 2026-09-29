@@ -1,0 +1,5 @@
+config.json
+export/
+*.pyc
+__pycache__/
+.DS_Store

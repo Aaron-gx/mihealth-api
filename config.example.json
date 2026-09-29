@@ -1,0 +1,5 @@
+{
+  "ssecurity": "<16字节密钥 base64, 从 WebView Cookies 的 ssecurity 行>",
+  "service_token": "<sts-hlth.io.mi.com 行的 serviceToken>",
+  "cuser_id": "<sts-hlth.io.mi.com 行的 cUserId>"
+}

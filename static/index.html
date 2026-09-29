@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>小米运动健康 · 数据看板</title>
+<script src="/vendor/chart.umd.min.js"></script>
+<style>
+:root{--bg:#f4f6fa;--card:#ffffff;--fg:#1f2430;--mut:#6b7280;--acc:#2f6fed;--acc2:#16a34a;--warn:#d97706;--bd:#e3e7ef}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:"Segoe UI",system-ui,"PingFang SC","Microsoft YaHei",sans-serif}
+header{display:flex;align-items:baseline;gap:14px;padding:18px 24px 6px}
+header h1{font-size:19px;margin:0;font-weight:600}
+header .sub{color:var(--mut);font-size:12px}
+header .sp{flex:1}
+header select,header button{background:var(--card);color:var(--fg);border:1px solid var(--bd);border-radius:8px;padding:6px 12px;font-size:13px;cursor:pointer}
+.wrap{max-width:1200px;margin:0 auto;padding:14px 20px 40px}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:12px;margin:14px 0 22px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:14px 16px;box-shadow:0 1px 2px rgba(16,24,40,.04)}
+.card .k{font-size:12px;color:var(--mut)}
+.card .v{font-size:24px;font-weight:650;margin-top:6px}
+.card .u{font-size:12px;color:var(--mut);margin-left:4px}
+.card .x{font-size:11px;color:var(--mut);margin-top:6px}
+.panel{background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:16px;margin-bottom:18px;box-shadow:0 1px 2px rgba(16,24,40,.04)}
+.panel h3{margin:0 0 10px;font-size:15px;font-weight:600}
+.panel .hint{color:var(--mut);font-size:12px}
+.chart{position:relative;height:280px}
+.chart.tall{height:320px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--bd)}
+th{color:var(--mut);font-weight:500;font-size:12px}
+td.mono{font-variant-numeric:tabular-nums}
+.pill{display:inline-block;padding:2px 8px;border-radius:99px;background:#e8efff;color:#2f6fed;font-size:11px}
+.err{color:#dc2626;font-size:13px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+@media(max-width:860px){.grid2{grid-template-columns:1fr}}
+.foot{color:var(--mut);font-size:11px;padding:8px 4px}
+</style>
+</head>
+<body>
+<header>
+  <h1>小米运动健康 · 数据看板</h1>
+  <span class="sub" id="upd"></span>
+  <span class="sp"></span>
+  <select id="range">
+    <option value="24">近 24 小时</option>
+    <option value="48">近 48 小时</option>
+    <option value="168" selected>近 7 天</option>
+    <option value="720">近 30 天</option>
+  </select>
+  <button id="reload">刷新</button>
+</header>
+<div class="wrap">
+  <div class="cards" id="cards"></div>
+
+  <div class="panel">
+    <h3>步数趋势</h3>
+    <div class="chart"><canvas id="cSteps"></canvas></div>
+  </div>
+
+  <div class="grid2">
+    <div class="panel">
+      <h3>心率 (bpm)</h3>
+      <div class="chart"><canvas id="cHr"></canvas></div>
+    </div>
+    <div class="panel">
+      <h3>血氧饱和度 (%)</h3>
+      <div class="chart"><canvas id="cSpo2"></canvas></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3>睡眠记录</h3>
+    <table id="tSleep">
+      <thead><tr><th>日期</th><th>入睡</th><th>醒来</th><th>时长</th><th>深睡</th><th>平均心率</th><th>平均血氧</th><th>评分</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <h3>每日目标达成</h3>
+    <table id="tGoals">
+      <thead><tr><th>日期</th><th>步数</th><th>热量</th><th>活动时长</th><th>站立</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <h3>运动记录</h3>
+    <table id="tSport">
+      <thead><tr><th>时间</th><th>类型</th><th>时长</th><th>距离</th><th>卡路里</th><th>平均配速</th><th>平均心率</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="foot">数据源：hlth.io.mi.com 内部 API（逆向） · 账号凭证实时拉取 · <span id="cnt"></span></div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const fmtT=ms=>{const d=new Date(ms* (String(ms).length<13?1000:1));return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;};
+const fmtD=ms=>{const d=new Date(ms*(String(ms).length<13?1000:1));return `${d.getMonth()+1}/${d.getDate()}`;};
+const fmtDT=ms=>{const d=new Date(ms*(String(ms).length<13?1000:1));return `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;};
+const SPORT_CN={1:'户外跑步',2:'健走',3:'骑行',4:'登山',5:'越野跑',6:'室内跑步',9:'泳池游泳',12:'跳绳',14:'自由训练',18:'椭圆机',21:'划船机',24:'瑜伽',25:'滑雪',999:'其他'};
+function pace(v){if(!v||v<=0)return '-';const m=Math.floor(v/60),s=Math.round(v%60);return `${m}'${String(s).padStart(2,'0')}"`;}
+function dur(s){if(!s)return '-';const h=Math.floor(s/3600),m=Math.round((s%3600)/60);return h?`${h}h${m}m`:`${m}m`;}
+const charts={};
+function mk(id,cfg){if(charts[id])charts[id].destroy();charts[id]=new Chart($(id),cfg);}
+function series(key,hours){return fetch(`/api/series/${key}?hours=${hours}`).then(r=>r.json());}
+function bucket(items,field,hours){
+  // 按聚合粒度分桶: <48h→10min, <=168h→hour, else→day
+  const g=hours<=48?600000:(hours<=168?3600000:86400000);
+  const m=new Map();
+  for(const it of items){const t=it._t;if(!t)continue;const b=Math.floor(t*1000/g)*g;const v=it[field]||0;
+    if(!m.has(b))m.set(b,{n:0,v:0});const e=m.get(b);e.n++;e.v+=v;}
+  const keys=[...m.keys()].sort((a,b)=>a-b);
+  return {labels:keys.map(k=>hours<=168?fmtDT(k):fmtD(k)),data:keys.map(k=>m.get(k).v)};
+}
+function lineSet(items,field,hours){
+  const pts=items.filter(x=>x[field]!=null).map(x=>({x:fmtDT((x._t)*1000),y:x[field]}));
+  // 抽样防点过多
+  const max=hours<=48?400:900, st=Math.max(1,Math.floor(pts.length/max));
+  return pts.filter((_,i)=>i%st===0);
+}
+async function loadAll(){
+  const hours=+$('range').value;
+  const [ov,st,hr,spo2,sleep,sport]=await Promise.all([
+    fetch('/api/overview').then(r=>r.json()),
+    series('steps',hours),series('heart_rate',hours),series('spo2',hours),
+    series('sleep',hours>720?720:168),
+    fetch(`/api/sport_records?days=${hours>=720?30:days_of(hours)}`).then(r=>r.json())
+  ]);
+  if(ov.ok){$('upd').textContent='更新于 '+fmtDT(ov.ts);
+    $('cnt').textContent=`本窗口数据点: 步数${ov.counts.steps} 心率${ov.counts.hr} 睡眠${ov.counts.sleep} 血氧${ov.counts.spo2}`;
+    renderCards(ov);}
+  else renderErr(ov);
+  renderSteps(st); renderLine('cHr',hr,'bpm','#ff6b81'); renderLine('cSpo2',spo2,'spo2','#4fc3f7');
+  renderSleep(sleep); renderSport(sport);
+  loadGoals();
+}
+function days_of(h){return Math.max(1,Math.ceil(h/24));}
+function renderCards(ov){
+  const s=ov.sleep_last;
+  $('cards').innerHTML=`
+    <div class="card"><div class="k">今日步数</div><div class="v">${(ov.steps_today||0).toLocaleString()}<span class="u">步</span></div></div>
+    <div class="card"><div class="k">今日热量</div><div class="v">${ov.calories_today??'-'}<span class="u">kcal</span></div></div>
+    <div class="card"><div class="k">最新心率</div><div class="v">${ov.hr_last??'-'}<span class="u">bpm</span></div><div class="x">24h最低 ${ov.hr_min_24h??'-'}</div></div>
+    <div class="card"><div class="k">最新血氧</div><div class="v">${ov.spo2_last??'-'}<span class="u">%</span></div></div>
+    <div class="card"><div class="k">最近睡眠</div><div class="v">${s?dur(Math.round((s.device_wake_up_time-s.bedtime))):'-'}</div><div class="x">${s?('深睡 '+dur(s.sleep_deep_duration*60)):'无记录'}</div></div>
+    <div class="card"><div class="k">体重</div><div class="v">${ov.weight_last??'-'}<span class="u">kg</span></div></div>
+    <div class="card"><div class="k">PAI</div><div class="v">${(ov.pai&&(ov.pai.pai??ov.pai.value))??'-'}</div></div>`;
+}
+function renderErr(ov){$('cards').innerHTML=`<div class="card err">认证/拉取失败：${JSON.stringify(ov.err||ov).slice(0,200)}<br>凭证可能过期，需重新提取 serviceToken</div>`;}
+function emptyState(id,msg){const c=document.querySelector('#'+id);if(c){const p=c.parentElement;let e=p.querySelector('.empty');if(!e){e=document.createElement('div');e.className='empty hint';p.appendChild(e);}e.textContent=msg;}}
+function clearEmpty(id){const c=document.querySelector('#'+id);if(c){const e=c.parentElement.querySelector('.empty');if(e)e.remove();}}
+function renderSteps(st){
+  const hours=+$('range').value;
+  if(!st.ok||!st.items.length){emptyState('cSteps','该时间窗暂无步数数据');mk('cSteps',{type:'bar',data:{labels:[],datasets:[]}});return;}
+  clearEmpty('cSteps');
+  const b=bucket(st.items,'steps',hours);
+  mk('cSteps',{type:'bar',data:{labels:b.labels,datasets:[{label:'步数',data:b.data,backgroundColor:'#2f6fed'}]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{ticks:{maxTicksLimit:16,color:'#6b7280'},grid:{color:'#eef1f6'}},y:{beginAtZero:true,ticks:{color:'#6b7280'},grid:{color:'#eef1f6'}}}}});
+}
+function renderLine(id,pack,field,color){
+  const hours=+$('range').value;
+  const pts=pack.ok?lineSet(pack.items,field,hours):[];
+  if(!pts.length){emptyState(id,'该时间窗暂无数据');mk(id,{type:'line',data:{datasets:[]}});return;}
+  clearEmpty(id);
+  mk(id,{type:'line',data:{datasets:[{label:field,data:pts,borderColor:color,borderWidth:1.2,pointRadius:0,fill:{target:'origin',above:color+'1f'},parsing:false}]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{type:'category',ticks:{maxTicksLimit:10,color:'#6b7280'},grid:{color:'#eef1f6'}},y:{ticks:{color:'#6b7280'},grid:{color:'#eef1f6'}}}}});
+}
+function renderSleep(pack){
+  const tb=$('tSleep').querySelector('tbody');tb.innerHTML='';
+  const items=(pack.ok?pack.items:[]).slice().reverse();
+  if(!items.length){tb.innerHTML='<tr><td colspan="8" class="hint">该时间窗无记录</td></tr>';return;}
+  for(const s of items){
+    const tot=s.device_wake_up_time&&s.bedtime?s.device_wake_up_time-s.bedtime:0;
+    tb.insertAdjacentHTML('beforeend',`<tr>
+      <td>${fmtD(s.bedtime*1000)}</td><td class="mono">${fmtT(s.bedtime*1000)}</td>
+      <td class="mono">${fmtT((s.device_wake_up_time||s.bedtime)*1000)}</td>
+      <td>${dur(tot)}</td><td>${dur((s.sleep_deep_duration||0)*60)}</td>
+      <td>${s.avg_hr??'-'}</td><td>${s.avg_spo2??'-'}</td><td>${s.score??s.sleep_score??'-'}</td></tr>`);
+  }
+}
+async function loadGoals(){
+  const tb=$('tGoals').querySelector('tbody');tb.innerHTML='';
+  const r=await fetch('/api/daily_goals?days=14').then(r=>r.json());
+  const items=r.ok?r.items:[];
+  if(!items.length){tb.innerHTML='<tr><td colspan="5" class="hint">无记录</td></tr>';return;}
+  const fmt=(g,name)=>{const x=g[name];if(!x||x.target==null)return '-';
+    const p=x.target?Math.round(100*x.achieved/x.target):0;
+    return `${x.achieved}/${x.target} <span class="pill">${p}%</span>`;};
+  for(const d of items){
+    tb.insertAdjacentHTML('beforeend',`<tr><td class="mono">${fmtD((d.time)*1000)}</td>
+      <td>${fmt(d.goals,'steps')}</td><td>${fmt(d.goals,'calories')}</td>
+      <td>${fmt(d.goals,'active_minutes')}</td><td>${fmt(d.goals,'stand_hours')}</td></tr>`);
+  }
+}
+function renderSport(pack){
+  const tb=$('tSport').querySelector('tbody');tb.innerHTML='';
+  const items=(pack.ok?pack.items:[]).slice().reverse();
+  if(!items.length){tb.innerHTML='<tr><td colspan="7" class="hint">无记录</td></tr>';return;}
+  for(const s of items){
+    tb.insertAdjacentHTML('beforeend',`<tr>
+      <td class="mono">${fmtDT((s.start_time||s._t||0)*1000)}</td>
+      <td><span class="pill">${SPORT_CN[s.sport_type]||s._key||s.sport_type||'-'}</span></td>
+      <td>${dur(s.duration||((s.end_time||0)-(s.start_time||0)))}</td>
+      <td class="mono">${s.distance?(s.distance>=1000?(s.distance/1000).toFixed(2)+' km':s.distance+' m'):'-'}</td>
+      <td class="mono">${s.calories??'-'}</td>
+      <td class="mono">${pace(s.avg_pace)}</td>
+      <td class="mono">${s.avg_hrm??'-'}</td></tr>`);
+  }
+}
+$('reload').onclick=loadAll;$('range').onchange=loadAll;
+loadAll();setInterval(loadAll,300000);
+</script>
+</body>
+</html>
