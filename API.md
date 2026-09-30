@@ -281,7 +281,7 @@ heel_landing_duration/golpe_landing_duration/max_contact_time`
 ```
 ① GET  https://account.xiaomi.com/pass/serviceLogin?sid=miothealth&_json=true
         → {_sign, qs, callback:"https://sts-hlth.io.mi.com/healthapp/sts", code:70016}
-   注：sid=miothealth 是米健康的服务标识，回调正是我们用的 STS 主机
+   注：sid=miothealth 是米健康的服务标识，回调指向 STS 主机
 
 ②a 免密：带 cookie {passToken, cUserId, userId} 重发 ①
         → {code:0, ssecurity, cUserId, userId, location:"https://sts-hlth.io.mi.com/...?ticket=..."}
@@ -303,8 +303,7 @@ if (XMPassportSettings.getPassWordEncryptor() == null)      // 无 EUI 加密器
 ```
 
 与社区在用实现（Xiaomi-cloud-tokens-extractor）一致：`md5(password).hexdigest().upper()`。
-**网上流传的"双重 MD5"是错的**（那是别的产品/网页端的做法），用错会稳定收到
-`code=70016 登录验证失败`——这正是本项目第一版踩的坑。
+若按"双重 MD5"（另一类端点的做法）计算，会稳定收到 `code=70016 登录验证失败`。
 
 **必须的客户端伪装**（缺任一都可能被判 70016）：
 
@@ -317,7 +316,7 @@ if (XMPassportSettings.getPassWordEncryptor() == null)      // 无 EUI 加密器
 | 密码提交 | `POST serviceLoginAuth2`，字段放 **query**（`params=fields`），`allow_redirects=False` |
 | 验证码 | 字段名 **`captCode`**（不是 `icode`），`ick` 在 cookie；验证码与会话绑定，取图也要用同一 session |
 
-要点（都是实测踩出来的）：
+要点：
 
 | 现象 | 结论 |
 |---|---|
@@ -346,7 +345,7 @@ if (XMPassportSettings.getPassWordEncryptor() == null)      // 无 EUI 加密器
 adb exec-out su -c "base64 /data/data/com.mi.health/app_webview/Default/Cookies"   # 本地 b64decode
 ```
 
-base64 是纯文本、对行规则免疫；兜底方案是 `su -c cp` 到 `/data/local/tmp` 再 `adb pull`（二进制安全）。
+base64 是纯文本、对行规则免疫；若目标环境无 base64，可 `su -c cp` 到 `/data/local/tmp` 再 `adb pull`（二进制安全）。
 脚本还做了尺寸规整：定位 `SQLite format 3\0` 魔数、按头部 `page_size × page_count` 截断。
 
 ### 5.3 实现注意

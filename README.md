@@ -109,7 +109,7 @@ python tools/refresh_credentials.py                  # 从设备导入（含 pas
 > 落盘内容只有 `ssecurity / service_token / cuser_id / user_id / pass_token / session_at`（`config.json`，权限 600）。
 > 注意 `ssecurity` **每次会话都会变**，必须与同次会话的 token 配套使用。
 
-**登录实现要点**（与客户端行为保持一致，每一环都踩过坑）：
+**登录实现要点**（与客户端行为保持一致）：
 
 | 环节 | 正确做法 | 错的后果 |
 |---|---|---|
