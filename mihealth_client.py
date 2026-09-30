@@ -575,6 +575,7 @@ def load_config(path=None):
         "adb_serial": cfg.get("adb_serial"),
         "db": cfg.get("db"),
         "min_interval": float(cfg.get("min_interval") or 0.0),
+        "proxies": cfg.get("proxies") or None,
         "config_path": cand,
     }
 
@@ -583,7 +584,8 @@ def client_from_config(cfg=None, **kw):
     """Build a client from config; explicit kwargs override config values."""
     cfg = cfg or load_config()
     params = {"region": cfg.get("region") or "cn", "host": cfg.get("host"),
-              "min_interval": cfg.get("min_interval") or 0.0}
+              "min_interval": cfg.get("min_interval") or 0.0,
+              "proxies": cfg.get("proxies") or None}
     params.update(kw)
     return MiHealthClient(cfg["ssecurity"], cfg["service_token"], cfg["cuser_id"], **params)
 

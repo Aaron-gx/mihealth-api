@@ -295,6 +295,28 @@ heel_landing_duration/golpe_landing_duration/max_contact_time`
 ④ 用 {ssecurity, serviceToken, cUserId} 调 app/v1 接口（第 2 章协议）✅ 实测 code:0
 ```
 
+**密码哈希：单次 MD5 大写。** 反编译 `XMPassport.loginByPassword`：
+
+```java
+if (XMPassportSettings.getPassWordEncryptor() == null)      // 无 EUI 加密器时的明文回退路径
+    params.put("hash", CloudCoder.getMd5DigestUpperCase(password));   // ← 单次，直接对原密码
+```
+
+与社区在用实现（Xiaomi-cloud-tokens-extractor）一致：`md5(password).hexdigest().upper()`。
+**网上流传的"双重 MD5"是错的**（那是别的产品/网页端的做法），用错会稳定收到
+`code=70016 登录验证失败`——这正是本项目第一版踩的坑。
+
+**必须的客户端伪装**（缺任一都可能被判 70016）：
+
+| 项 | 值 |
+|---|---|
+| cookie `sdkVersion` | `accountsdk-18.8.15`（域 `mi.com` 与 `xiaomi.com`，**登录前就要设**） |
+| cookie `deviceId` | 任意稳定伪设备号（SDK 里经 `addDeviceIdInCookies` 放入 cookie，不在表单） |
+| User-Agent | 形如 `<随机串>-AAAAA APP/com.xiaomi.mihome APPV/10.5.201` |
+| 第一步 cookie | `userId=<账号>` |
+| 密码提交 | `POST serviceLoginAuth2`，字段放 **query**（`params=fields`），`allow_redirects=False` |
+| 验证码 | 字段名 **`captCode`**（不是 `icode`），`ick` 在 cookie；验证码与会话绑定，取图也要用同一 session |
+
 要点（都是实测踩出来的）：
 
 | 现象 | 结论 |

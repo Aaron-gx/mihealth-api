@@ -102,6 +102,13 @@ python tools/refresh_credentials.py                  # 从设备导入（含 pas
 > 落盘内容只有 `ssecurity / service_token / cuser_id / user_id / pass_token / session_at`（`config.json`，权限 600）。
 > 注意 `ssecurity` **每次会话都会变**，必须与同次会话的 token 配套使用。
 
+**密码登录实现细节**（照 SDK 反编译 + 社区在用实现，缺一不可）：
+密码哈希是 **单次 `MD5(password).upper()`**（"双重 MD5"是错的，会稳定报"登录验证失败"）；
+登录前必须设 `sdkVersion=accountsdk-18.8.15` 与 `deviceId` 两个 cookie，
+并用形如 `<随机>-AAAAA APP/com.xiaomi.mihome APPV/10.5.201` 的 UA；
+验证码字段名是 `captCode`（验证码与会话绑定，取图需同一 session）。
+海外账号或网络不稳时可在 `config.json` 里配 `proxies`。
+
 ### 备用：手动提取
 
 在已登录小米账号的 rooted 设备/模拟器上：

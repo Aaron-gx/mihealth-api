@@ -175,33 +175,63 @@ def api_login_refresh():
         return jsonify({"ok": False, "err": "config 里没有 pass_token：请先账号密码登录或从设备导入"}), 400
     from login import LoginError, refresh_session
     try:
-        sess = refresh_session(cfg, CFG_PATH)
+        sess = refresh_session(cfg, CFG_PATH, proxies=cfg.get("proxies"))
     except LoginError as e:
         return jsonify({"ok": False, "err": str(e), "code": e.code}), 400
     _apply_session(sess)
     return jsonify({"ok": True, "mode": "passToken", "token_prefix": sess["service_token"][:14]})
 
 
+_login_state = {"session": None, "captcha_url": None, "username": None}
+
+
 @app.route("/api/login", methods=["POST"])
 def api_login_password():
-    """账号密码登录（首次）。密码仅用于当次请求，不落盘；可能要求验证码。"""
+    """账号密码登录（首次）。密码仅用于当次请求，不落盘；可能要求验证码。
+
+    验证码流程：同一登录会话（requests.Session）在两次请求间保留，
+    因为 Xiaomi 把验证码绑定在会话 cookie（ick）上。
+    """
     body = request.get_json(force=True, silent=True) or {}
-    username, password = body.get("username"), body.get("password")
+    username, password = body.get("username") or _login_state["username"], body.get("password")
+    captcha = body.get("captcha")
     if not (username and password):
         return jsonify({"ok": False, "err": "需要 username 与 password"}), 400
-    from login import LoginError, login_with_password
+    from login import LoginError, login_with_password, new_login_session
+    proxies = CFG.get("proxies") or None
+    if _login_state["session"] is None:
+        _login_state["session"] = new_login_session(proxies=proxies)
     try:
-        sess = login_with_password(username, password, captcha=body.get("captcha"),
-                                   ick=body.get("ick"))
+        sess = login_with_password(username, password, captcha=captcha,
+                                   proxies=proxies, session=_login_state["session"])
     except LoginError as e:
-        return jsonify({"ok": False, "err": str(e), "code": e.code,
-                        "captcha_url": e.captcha_url}), 400
+        _login_state["username"] = username
+        if e.captcha_url:
+            _login_state["captcha_url"] = e.captcha_url
+            return jsonify({"ok": False, "err": str(e), "code": e.code,
+                            "captcha_url": "/api/login/captcha"}), 400
+        _login_state["session"] = None
+        return jsonify({"ok": False, "err": str(e), "code": e.code}), 400
+    _login_state.update(session=None, captcha_url=None, username=None)
     if not sess.get("service_token"):
         return jsonify({"ok": False, "err": "登录成功但未取得 serviceToken（可能需要二次验证）"}), 400
     _apply_session(sess)
     return jsonify({"ok": True, "mode": "password",
                     "pass_token_saved": bool(sess.get("pass_token")),
                     "token_prefix": sess["service_token"][:14]})
+
+
+@app.route("/api/login/captcha")
+def api_login_captcha():
+    """代理小米验证码图片（必须用同一登录会话的 cookie 取，浏览器直连会失配）。"""
+    url = _login_state.get("captcha_url")
+    if not url or _login_state["session"] is None:
+        return jsonify({"ok": False, "err": "没有待处理的验证码"}), 404
+    if url.startswith("/"):
+        url = "https://account.xiaomi.com" + url
+    r = _login_state["session"].get(url, timeout=25)
+    from flask import Response
+    return Response(r.content, mimetype=r.headers.get("Content-Type", "image/jpeg"))
 
 
 @app.route("/api/login/import_device", methods=["POST"])

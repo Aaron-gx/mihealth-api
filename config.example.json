@@ -1,5 +1,16 @@
 {
-  "ssecurity": "<16字节密钥 base64, 从 WebView Cookies 的 ssecurity 行>",
-  "service_token": "<sts-hlth.io.mi.com 行的 serviceToken>",
-  "cuser_id": "<sts-hlth.io.mi.com 行的 cUserId>"
+  "ssecurity": "<每次登录会话都会变，与 service_token 配套；登录流程会自动写入>",
+  "service_token": "<sts-hlth.io.mi.com 的 serviceToken>",
+  "cuser_id": "<cUserId>",
+  "user_id": "<明文 userId，可选>",
+  "pass_token": "<免密续期用；账号密码登录或从设备导入时自动写入，不要泄露>",
+  "session_at": 0,
+  "sid": "miothealth",
+  "region": "cn",
+  "host": null,
+  "db": null,
+  "min_interval": 0.4,
+  "proxies": null,
+  "adb_serial": null,
+  "device_id": null
 }

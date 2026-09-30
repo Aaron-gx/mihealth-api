@@ -44,18 +44,58 @@ def _json_body(text):
     return json.loads(text[i:]) if i >= 0 else {}
 
 
+def _req(session, method, url, tries=3, **kw):
+    """带重试的请求：passport/STS 直连偶发超时很常见。"""
+    kw.setdefault("timeout", 25)
+    last = None
+    for attempt in range(tries):
+        try:
+            return getattr(session, method)(url, **kw)
+        except requests.RequestException as e:
+            last = e
+            time.sleep(1 + attempt)
+    raise LoginError(f"网络请求失败（{tries} 次）：{type(last).__name__}: {last}")
+
+
 def md5_upper(s: str) -> str:
     return hashlib.md5(s.encode("utf-8")).hexdigest().upper()
 
 
 def hash_password(password: str) -> str:
-    """XMPassport.loginByPassword 的回退算法（无 EUI 加密器时）。"""
-    return md5_upper(md5_upper(password))
+    """XMPassport.loginByPassword 的明文回退算法：**单次** MD5 大写。
+
+    反编译 `XMPassport.loginByPassword` 为
+        if (encryptor == null) hash = CloudCoder.getMd5DigestUpperCase(password)
+    与社区在用实现（Xiaomi-cloud-tokens-extractor）一致：
+        hashlib.md5(password.encode()).hexdigest().upper()
+    注意网上流传的"双重 MD5"是另一套（多为某些 Web 端），用错会被判 70016 登录验证失败。
+    """
+    return md5_upper(password)
 
 
-def _session(proxies=None):
+def hash_password_variants(password: str):
+    """排错用：服务端若拒绝，可依次尝试这些变体（谨慎，避免多次失败触发风控）。"""
+    h1 = md5_upper(password)
+    return {
+        "md5_upper": h1,                                     # SDK / 社区在用（默认）
+        "md5_md5_upper_upper": md5_upper(h1),                # 双重（部分 Web 端）
+        "md5_lower": hashlib.md5(password.encode()).hexdigest(),
+    }
+
+
+SDK_VERSION = "accountsdk-18.8.15"      # 必须的 sdkVersion cookie，缺了会被判 70016
+AGENT = ("XiaomiHealthApi-ABCDE APP/com.xiaomi.mihome APPV/10.5.201")
+
+
+def _session(proxies=None, device_id=None):
+    """passport 要求客户端自称一个 SDK 版本并携带 deviceId，否则密码登录会被拒绝。"""
     s = requests.Session()
-    s.headers.update({"User-Agent": UA})
+    s.headers.update({"User-Agent": AGENT,
+                      "Content-Type": "application/x-www-form-urlencoded"})
+    for dom in ("mi.com", "xiaomi.com"):
+        s.cookies.set("sdkVersion", SDK_VERSION, domain=dom)
+        if device_id:
+            s.cookies.set("deviceId", device_id, domain=dom)
     if proxies:
         s.proxies.update(proxies)
     return s
@@ -63,8 +103,8 @@ def _session(proxies=None):
 
 def service_login(S, sid=SID_HEALTH):
     """第一步：拿 _sign / qs / callback。"""
-    r = S.get(f"{ACCOUNT_HOST}/pass/serviceLogin",
-              params={"sid": sid, "_json": "true"}, timeout=20)
+    r = _req(S, "get", f"{ACCOUNT_HOST}/pass/serviceLogin",
+             params={"sid": sid, "_json": "true"})
     j = _json_body(r.text)
     if not j.get("_sign"):
         raise LoginError(f"serviceLogin 未返回 _sign（HTTP {r.status_code}）", raw=j)
@@ -84,13 +124,13 @@ def exchange_pass_token(pass_token, cuser_id, user_id, sid=SID_HEALTH, proxies=N
     for k, v in ck.items():
         if v:
             S.cookies.set(k, v, domain=".account.xiaomi.com")
-    r = S.get(f"{ACCOUNT_HOST}/pass/serviceLogin",
-              params={"sid": sid, "_json": "true"}, cookies=ck, timeout=20)
+    r = _req(S, "get", f"{ACCOUNT_HOST}/pass/serviceLogin",
+             params={"sid": sid, "_json": "true"}, cookies=ck)
     j = _json_body(r.text)
     if j.get("code") != 0 or not j.get("location"):
         raise LoginError(f"passToken 无效或已过期（code={j.get('code')} {j.get('desc')}）", raw=j)
 
-    r2 = S.get(j["location"], cookies=ck, allow_redirects=False, timeout=20)
+    r2 = _req(S, "get", j["location"], cookies=ck, allow_redirects=False)
     token = (S.cookies.get("serviceToken", domain="sts-hlth.io.mi.com")
              or S.cookies.get("serviceToken"))
     if not token:
@@ -103,38 +143,71 @@ def exchange_pass_token(pass_token, cuser_id, user_id, sid=SID_HEALTH, proxies=N
             "sid": sid, "ts": int(time.time())}
 
 
+def new_login_session(proxies=None, device_id=None):
+    """建立带 sdkVersion/deviceId cookie 的会话；验证码流程需要复用它（ick 在会话里）。"""
+    return _session(proxies, device_id or _device_id())
+
+
 def login_with_password(username, password, sid=SID_HEALTH, captcha=None, ick=None,
-                        device_id=None, proxies=None):
-    """账号密码登录（首次）。返回 session（含 pass_token）；可能抛 LoginError 且带 captcha_url。"""
-    S = _session(proxies)
-    j = service_login(S, sid)
-    data = {"user": username, "hash": hash_password(password), "sid": sid,
-            "_json": "true", "_sign": j["_sign"], "qs": j.get("qs") or f"?sid={sid}&_json=true",
-            "callback": j.get("callback") or ""}
+                        device_id=None, proxies=None, hash_variant="md5_upper",
+                        locale="zh_CN", session=None):
+    """账号密码登录（首次）。返回 session（含 pass_token）；可能抛 LoginError 且带 captcha_url。
+
+    字段名与发送位置对齐 SDK + 社区在用实现：
+      * `hash`      = MD5(password).upper()          （单次，见 hash_password）
+      * `captCode`  = 验证码（**不是** icode），`ick` 在 cookie 里
+      * 字段放在 **query**（社区实现 post(params=fields) 验证可用）
+      * deviceId 走 cookie（SDK 的 addDeviceIdInCookies），非必填
+    """
+    S = session or _session(proxies, device_id or _device_id())
+    # ① 取 _sign / qs / callback（带 userId cookie）
+    r1 = _req(S, "get", f"{ACCOUNT_HOST}/pass/serviceLogin",
+              params={"sid": sid, "_json": "true"}, cookies={"userId": username})
+    j = _json_body(r1.text)
+    if not j.get("_sign"):
+        raise LoginError(f"serviceLogin 未返回 _sign（HTTP {r1.status_code}）", raw=j)
+
+    # ② 提交密码（字段放 query，与在用实现一致）
+    fields = {"user": username, "hash": hash_password_variants(password)[hash_variant],
+              "sid": sid, "_json": "true", "_sign": j["_sign"],
+              "qs": j.get("qs") or f"?sid={sid}&_json=true",
+              "callback": j.get("callback") or "", "locale": locale}
     if captcha:
-        data["icode"] = captcha
-    if ick:
-        data["ick"] = ick
-    if device_id:
-        data["deviceId"] = md5_upper(device_id)      # CloudCoder.hashDeviceInfo 同族
-    r = S.post(f"{ACCOUNT_HOST}/pass/serviceLoginAuth2", data=data, timeout=25)
-    j2 = _json_body(r.text)
-    code = j2.get("code")
-    if code == 0 or j2.get("location"):
-        # 第三步：跟 STS 回调拿 serviceToken
-        loc = j2.get("location")
-        token = None
-        if loc:
-            r3 = S.get(loc, allow_redirects=True, timeout=20)
-            token = S.cookies.get("serviceToken")
-            if not token:
-                m = re.search(r"serviceToken=([^;]+)", r3.headers.get("Set-Cookie", ""))
-                token = m.group(1) if m else None
-        return {"ssecurity": j2.get("ssecurity"), "service_token": token,
-                "cuser_id": j2.get("cUserId"), "user_id": j2.get("userId"),
-                "pass_token": j2.get("passToken"), "sid": sid, "ts": int(time.time())}
-    raise LoginError(j2.get("desc") or f"登录失败 code={code}", code=code,
-                     captcha_url=j2.get("captchaUrl"), raw=j2)
+        fields["captCode"] = captcha
+    cookies = {"ick": ick} if ick else {}
+    r2 = _req(S, "post", f"{ACCOUNT_HOST}/pass/serviceLoginAuth2", params=fields,
+              cookies=cookies, allow_redirects=False)
+    j2 = _json_body(r2.text)
+
+    # 需要验证码：把验证码图片地址回传给调用方（网页端展示给人填）
+    if j2.get("captchaUrl"):
+        raise LoginError("需要验证码", code=j2.get("code"),
+                         captcha_url=j2["captchaUrl"], raw=j2)
+    # 需要二次验证（邮件/短信）
+    if not (isinstance(j2.get("ssecurity"), str) and len(j2["ssecurity"]) > 4):
+        if j2.get("notificationUrl"):
+            raise LoginError("账号需要二次验证（2FA）：请在手机/邮箱完成验证后改用「从设备导入」或设置应用密码",
+                             code=j2.get("code"), raw=j2)
+        raise LoginError(j2.get("desc") or f"登录失败 code={j2.get('code')}",
+                         code=j2.get("code"), captcha_url=None, raw=j2)
+
+    # ③ 跟随 STS 回调拿 serviceToken
+    token = None
+    if j2.get("location"):
+        r3 = _req(S, "get", j2["location"], allow_redirects=True)
+        token = S.cookies.get("serviceToken") or S.cookies.get("serviceToken", domain="sts-hlth.io.mi.com")
+        if not token:
+            m = re.search(r"serviceToken=([^;]+)", r3.headers.get("Set-Cookie", ""))
+            token = m.group(1) if m else None
+    return {"ssecurity": j2.get("ssecurity"), "service_token": token,
+            "cuser_id": j2.get("cUserId"), "user_id": j2.get("userId"),
+            "pass_token": j2.get("passToken"), "sid": sid, "ts": int(time.time())}
+
+
+def _device_id():
+    """稳定伪设备号（也可写在 config 的 device_id 里）。"""
+    import random, string
+    return "".join(random.choice(string.ascii_uppercase + string.digits) for _ in range(16))
 
 
 # ---------------------------------------------------------------- config 落盘
@@ -165,11 +238,12 @@ def save_session(cfg_path, session, keep=None):
     return cfg_path
 
 
-def refresh_session(cfg, cfg_path=None):
+def refresh_session(cfg, cfg_path=None, proxies=None):
     """用 config 里的 pass_token 免密续期；成功返回新 session。"""
     if not cfg.get("pass_token") or not cfg.get("cuser_id"):
         raise LoginError("config 里没有 pass_token，无法免密续期（请先账号密码登录一次）")
-    s = exchange_pass_token(cfg["pass_token"], cfg["cuser_id"], cfg.get("user_id") or "")
+    s = exchange_pass_token(cfg["pass_token"], cfg["cuser_id"], cfg.get("user_id") or "",
+                            proxies=proxies or cfg.get("proxies"))
     if cfg_path:
         save_session(cfg_path, s)
     return s
