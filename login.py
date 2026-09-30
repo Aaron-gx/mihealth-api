@@ -144,8 +144,10 @@ def exchange_pass_token(pass_token, cuser_id, user_id, sid=SID_HEALTH, proxies=N
 
 
 def new_login_session(proxies=None, device_id=None):
-    """建立带 sdkVersion/deviceId cookie 的会话；验证码流程需要复用它（ick 在会话里）。"""
-    return _session(proxies, device_id or _device_id())
+    """建立带 sdkVersion/deviceId cookie 的会话；验证码/2FA 流程需要复用它。"""
+    s = _session(proxies, device_id or _device_id())
+    s.__dict__["_mih_device_id"] = md5_upper(device_id or _device_id())
+    return s
 
 
 def login_with_password(username, password, sid=SID_HEALTH, captcha=None, ick=None,
@@ -212,6 +214,40 @@ class Need2FA(LoginError):
 
 IDENTITY = "https://account.xiaomi.com/identity"
 
+# identity/* 是"App 侧"端点：UA 必须像米家 App（带 DeviceId/UserId 段），
+# 否则会返回空响应体（实测拿到 {} 就是这个原因）。deviceId 也要显式带 cookie。
+UA_APP = ("MiHome/11.3.203 (com.xiaomi.mihome; build:11.3.203; Android 9) "
+          "APP/com.xiaomi.mihome APPV/11.3.203 DeviceId/{dev} UserId/{uid} "
+          "Platform/Android Region/CN L/zh_CN")
+
+
+def _identity_headers(session):
+    dev = session.__dict__.get("_mih_device_id") or ""
+    uid = session.__dict__.get("_mih_user_id") or ""
+    return {"User-Agent": UA_APP.format(dev=dev, uid=uid),
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Referer": "https://account.xiaomi.com/"}
+
+
+def _identity_cookies(session):
+    ck = {}
+    dev = session.__dict__.get("_mih_device_id")
+    if dev:
+        ck["deviceId"] = dev
+    return ck
+
+
+def _id_call(session, method, url, step, **kw):
+    """identity 步骤的调用：带 App UA/cookie，失败时把 HTTP 状态与原始体带到错误里。"""
+    kw.setdefault("headers", _identity_headers(session))
+    kw.setdefault("cookies", _identity_cookies(session))
+    r = _req(session, method, url, **kw)
+    text = (r.text or "").strip()
+    if not text:
+        raise LoginError(f"[{step}] 服务端返回空响应（HTTP {r.status_code}）——通常是 UA/deviceId 不被接受",
+                         raw={"status": r.status_code, "step": step})
+    return r
+
 
 def start_2fa(session, notification_url, sid=SID_HEALTH, locale="zh_CN"):
     """触发二次验证码。返回 {context, flag, method, hint}，给 finish_2fa 用。
@@ -227,13 +263,15 @@ def start_2fa(session, notification_url, sid=SID_HEALTH, locale="zh_CN"):
     from urllib.parse import parse_qs, urlparse
     if not notification_url.startswith("http"):
         notification_url = ACCOUNT_HOST + notification_url
-    _req(session, "get", notification_url)
+    _id_call(session, "get", notification_url, "authStart")
     q = parse_qs(urlparse(notification_url).query)
     ctx = (q.get("context") or [""])[0]
     sid = (q.get("sid") or [sid])[0]
+    if q.get("userId"):
+        session.__dict__["_mih_user_id"] = q["userId"][0]
 
-    r = _req(session, "get", f"{IDENTITY}/list",
-             params={"sid": sid, "supportedMask": "0", "_locale": locale, "context": ctx})
+    r = _id_call(session, "get", f"{IDENTITY}/list", "identity/list",
+                 params={"sid": sid, "supportedMask": "0", "_locale": locale, "context": ctx})
     try:
         idata = r.json() or {}
     except Exception:
@@ -241,11 +279,11 @@ def start_2fa(session, notification_url, sid=SID_HEALTH, locale="zh_CN"):
     flag = idata.get("flag", 4)
     method = "Email" if flag == 8 else "Phone"
 
-    _req(session, "get", f"{IDENTITY}/auth/verify{method}",
-         params={"_flag": str(flag), "_json": "true"})
+    _id_call(session, "get", f"{IDENTITY}/auth/verify{method}", f"verify{method}(trigger)",
+             params={"_flag": str(flag), "_json": "true"})
     if method == "Phone":       # 手机通道需要真正触发下发
-        _req(session, "post", f"{IDENTITY}/auth/sendPhoneTicket",
-             data={"retry": "0", "icode": "", "_json": "true"})
+        _id_call(session, "post", f"{IDENTITY}/auth/sendPhoneTicket", "sendPhoneTicket",
+                 data={"retry": "0", "icode": "", "_json": "true"})
 
     hint = ""
     for k in ("mask", "notification", "email", "phone", "address"):
@@ -264,10 +302,11 @@ def finish_2fa(session, code, context, flag=4, sid=SID_HEALTH, locale="zh_CN"):
       → 跟随 STS 回调拿 serviceToken
     """
     method = "Email" if flag == 8 else "Phone"
-    r = _req(session, "post", f"{IDENTITY}/auth/verify{method}",
-             params={"_dc": str(int(time.time() * 1000))},
-             data={"_flag": str(flag), "ticket": code.strip(),
-                   "trust": "false", "_json": "true"})
+    r = _id_call(session, "post", f"{IDENTITY}/auth/verify{method}", f"verify{method}(submit)",
+                 params={"_dc": str(int(time.time() * 1000)), "_flag": str(flag),
+                         "_json": "true", "sid": sid, "context": context},
+                 data={"_flag": str(flag), "ticket": code.strip(),
+                       "trust": "false", "_json": "true"})
     try:
         vresp = r.json() or {}
     except Exception:
@@ -277,7 +316,10 @@ def finish_2fa(session, code, context, flag=4, sid=SID_HEALTH, locale="zh_CN"):
                          code=vresp.get("code"), raw=vresp)
     loc = vresp.get("location") or r.headers.get("Location")
     if not loc:
-        raise LoginError(f"验证码校验后未拿到跳转地址（响应：{json.dumps(vresp, ensure_ascii=False)[:200]}）",
+        m = re.search(r"location\s*[:=]\s*[\"']([^\"']+)", r.text or "")
+        loc = m.group(1) if m else None
+    if not loc:
+        raise LoginError(f"验证码校验后未拿到跳转地址（HTTP {r.status_code}，响应：{(r.text or '')[:200]!r}）",
                          raw=vresp)
     if not loc.startswith("http"):
         loc = ACCOUNT_HOST + loc
