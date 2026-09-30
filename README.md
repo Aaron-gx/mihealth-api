@@ -75,7 +75,7 @@ python tools/export_all.py                # 全量导出 JSON（不落库）
 | 全量回填 | 按时间窗 + `next_key` 游标翻页拉全历史，4 线程并发（`--workers`） |
 | 增量同步 | 走**水位变更流**（fitness / sport 各一条，族内向前推进），游标持久化，逐页落库 |
 | 时间窗补拉 | 增量时同时补拉最近 `--hours`（默认 72h），修复断档 |
-| 去重 | 分页重叠与多数据源（手表/手机）在**查询视图** `v_dedup` 收敛为每分钟一条 |
+| 去重 | 分页重叠与多数据源（手表/手机）在**物化去重表** `dedup` 收敛为每分钟一条（视图版实测 20~80s/查询，物化后 <0.5s，原始行完整保留在 `records`） |
 | 限流 | `--min-interval` 控制请求间隔（默认 0.4s），避免触发风控 |
 | 断点续传 | 游标每页落库，中断不丢进度；`INSERT OR REPLACE` 保证重跑幂等 |
 | 401 自愈 | 检测到鉴权失败自动调用 `tools/refresh_credentials.py` 重取凭据并**重试当次请求** |
@@ -90,7 +90,7 @@ python tools/export_all.py                # 全量导出 JSON（不落库）
 
 | 方式 | 说明 | 何时用 |
 |---|---|---|
-| **账号密码登录** | 用小米账号（手机号/邮箱/ID）+ 密码走 passport 登录，成功后保存 `passToken`。密码只用于当次请求、**不落盘**；可能弹验证码（面板会显示图片） | 首次接入 |
+| **账号密码登录** | 用小米账号（手机号/邮箱/ID）+ 密码走 passport 登录，成功后保存 `passToken`。密码只用于当次请求、**不落盘**。支持图片验证码与**短信/邮箱二次验证（2FA）**：面板会提示验证码发到了哪个通道并给出输入框 | 首次接入 |
 | **免密续期** | 用已保存的 `passToken` 换新 `serviceToken`，不需要密码/设备。passToken 有效期约 1~2 个月，可反复续期 | 日常（token 过期时自动触发） |
 | **从设备导入** | 从已登录 App 的 rooted 设备/模拟器读取会话（含 `passToken`），一条命令完成 | 手上已有登录态 |
 
@@ -108,11 +108,18 @@ python tools/refresh_credentials.py                  # 从设备导入（含 pas
 > 落盘内容只有 `ssecurity / service_token / cuser_id / user_id / pass_token / session_at`（`config.json`，权限 600）。
 > 注意 `ssecurity` **每次会话都会变**，必须与同次会话的 token 配套使用。
 
-**密码登录实现细节**（照 SDK 反编译 + 社区在用实现，缺一不可）：
-密码哈希是 **单次 `MD5(password).upper()`**（"双重 MD5"是错的，会稳定报"登录验证失败"）；
-登录前必须设 `sdkVersion=accountsdk-18.8.15` 与 `deviceId` 两个 cookie，
-并用形如 `<随机>-AAAAA APP/com.xiaomi.mihome APPV/10.5.201` 的 UA；
-验证码字段名是 `captCode`（验证码与会话绑定，取图需同一 session）。
+**密码登录实现细节**（照 SDK 反编译 + 社区在用实现，每一环都踩过坑）：
+
+| 环节 | 正确做法 | 错的后果 |
+|---|---|---|
+| 密码哈希 | **单次 `MD5(password).upper()`** | 用流传的"双重 MD5"会稳定报 `70016 登录验证失败` |
+| 客户端伪装 | 登录前设 cookie `sdkVersion=accountsdk-18.8.15` + `deviceId`，UA 形如 `<随机>-AAAAA APP/com.xiaomi.mihome APPV/10.5.201`，第一步带 `userId` cookie | 缺少就被判 `70016` |
+| 图片验证码 | 字段名 **`captCode`**；验证码绑定会话，取图与提交必须同一 session | 字段写成 `icode` 无效 |
+| **2FA 通道** | 由 `identity/list` 的 **`flag`** 决定：**4=手机短信、8=邮箱**；先 `GET verify{Phone\|Email}?_flag=`，手机通道还需 `POST sendPhoneTicket` 才真正下发 | 固定走邮箱会收到 `{"code":2,"flag":4,"options":[4]}`（要求改用手机） |
+| 2FA 的 UA | `identity/*` 是 App 侧端点，UA 必须像米家 App（带 `DeviceId/UserId` 段）+ `deviceId` cookie | 否则返回**空响应体** |
+| 响应解析 | 小米响应带 **`&&&START&&&`** 前缀，必须剥离后再 JSON 解析 | 直接 `r.json()` 抛异常 → 被当成"未拿到跳转地址" |
+| 完成后 | 提交验证码后**重做一次 `serviceLogin`**（会话已认证，直接返回 `ssecurity`/`passToken`/STS 地址） | — |
+
 海外账号或网络不稳时可在 `config.json` 里配 `proxies`。
 
 ### 备用：手动提取
@@ -166,6 +173,27 @@ adb shell su -c "sqlite3 /data/data/com.mi.health/app_webview/Default/Cookies \
 `valid_stand` `energy` `goal` `pai` `blood_pressure` `blood_sugar`
 `headset` `weight` `vo2_max` `menstruation`
 
+## 数据说明（消费时注意）
+
+| 项 | 说明 |
+|---|---|
+| 记录单位 | 记录的 `time`/`start_time`/`bedtime` 等是**秒**；接口入参 `startTime/endTime` 是**毫秒**（轨迹库 `start_time` 例外，是毫秒） |
+| 值是增量 | `steps`/`calories` 的 value 是**该分钟增量**，不是当日累计；聚合请自行累加或用 `/api/agg` |
+| 睡眠分期 | 分段 `items[].state`：**2=深睡、3=浅睡、4=REM**（用摘要 `sleep_deep/light/rem_duration` 反向核对确认） |
+| 睡分期时长 | `sleep_deep_duration` 等字段单位是**分钟**，`duration` 与 `bedtime→wake` 差值是**秒** |
+| 运动字段 | 跑步类记录有 79 个字段（跑姿动态、5K~全马预测、跑力指数、心率区间、训练负荷）；`avg_pace` 部分记录为空，可用 `时长÷距离` 推算（秒/公里） |
+| 轨迹 | 记录 value 里**没有坐标**；轨迹是独立资源（`route_info.file` / 轨迹库 `route_id`）。本账号云端 0 条 |
+| 数据源 | 同一分钟可能来自多个 `sid`（手表 / 手机 / App 线），默认查询走 `dedup` 表按最大值收敛；要原始多源请 `dedup=0` |
+
+## 已知限制（如实记录）
+
+| 项 | 状态 |
+|---|---|
+| `healthapp/service/gen_download_url`（FDS 预签名下载） | 服务端断连，未打通；轨迹文件下载暂不可用 |
+| `data/get_latest_fitness_data` | 参数按 bean 对齐仍返回 `-8`；用 `by_time` + `order=desc&limit=1` 等价替代 |
+| `statistics/get_stat_data_by_time` | 参数对齐后仍为空集，本账号无对应功能数据 |
+| GPS 轨迹 / 饮食记录 | 接口齐备，但本账号云端无数据（未开 GPS / 未用饮食记录） |
+
 ## 协议还原
 
 ```
@@ -192,13 +220,14 @@ Cookie: cUserId=...; serviceToken=<长token>; locale=zh_cn
 ## 目录
 
 ```
-mihealth_client.py   # Python 客户端 + crypto（重试/限流/去重/水位/区域）
-store.py             # SQLite 存储层（幂等 upsert + v_dedup 视图 + 游标）
+mihealth_client.py   # Python 客户端 + crypto（重试/限流/去重/水位/区域/401 自愈）
+login.py             # 小米账号登录（passport→STS）：密码 / passToken 免密 / 2FA
+store.py             # SQLite 存储层（幂等 upsert + 物化去重表 + 游标）
 sync.py              # 同步编排器：backfill / incremental / status / export
-server.py            # Flask HTTP 网关（看板 + REST 代理，库优先·实时回退）
-static/              # index.html + Chart.js + screenshot.png
+server.py            # Flask HTTP 网关（看板 + REST 代理 + 登录接口，库优先·实时回退）
+static/              # index.html + Chart.js + 看板截图
 tools/
-  refresh_credentials.py  # adb 自动重取凭据（base64 传输避开 pty 污染）
+  refresh_credentials.py  # adb 自动重取凭据（含 passToken；base64 传输避开 pty 污染）
   export_all.py           # 全量导出 JSON
   dump_tokens.js          # Frida hook 现场抓 token
 API.md               # 接口文档
