@@ -78,6 +78,8 @@ python tools/export_all.py                # 全量导出 JSON（不落库）
 
 ## 登录 / 会话（三种方式）
 
+![login](static/login.png)
+
 网页看板右上角 **登录** 按钮提供三条路径，都不需要每次都碰模拟器：
 
 | 方式 | 说明 | 何时用 |
