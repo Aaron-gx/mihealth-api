@@ -182,7 +182,8 @@ def api_login_refresh():
     return jsonify({"ok": True, "mode": "passToken", "token_prefix": sess["service_token"][:14]})
 
 
-_login_state = {"session": None, "captcha_url": None, "username": None, "2fa_context": None}
+_login_state = {"session": None, "captcha_url": None, "username": None,
+                "2fa_context": None, "2fa_flag": None}
 
 
 @app.route("/api/login", methods=["POST"])
@@ -202,12 +203,13 @@ def api_login_password():
     # 第二段：带 2FA 验证码，直接走完换取 serviceToken
     if code2fa and _login_state.get("2fa_context"):
         try:
-            sess = finish_2fa(_login_state["session"], code2fa, _login_state["2fa_context"])
+            sess = finish_2fa(_login_state["session"], code2fa, _login_state["2fa_context"],
+                              flag=_login_state.get("2fa_flag") or 4)
         except LoginError as e:
             return jsonify({"ok": False, "err": str(e), "need_2fa": True,
                             "code": e.code}), 400
         _login_state.update(session=None, captcha_url=None, username=None,
-                            **{"2fa_context": None})
+                            **{"2fa_context": None, "2fa_flag": None})
         if not sess.get("service_token"):
             return jsonify({"ok": False, "err": "验证通过但未取得 serviceToken"}), 400
         _apply_session(sess)
@@ -227,11 +229,14 @@ def api_login_password():
         try:
             info = start_2fa(_login_state["session"], e.notification_url)
             _login_state["2fa_context"] = info["context"]
-            msg = "需要二次验证：验证码已发送"
+            _login_state["2fa_flag"] = info.get("flag") or 4
+            chan = "短信" if info.get("method") == "Phone" else "邮箱"
+            msg = f"需要二次验证：验证码已发送到你的{chan}"
             if info.get("hint"):
                 msg += f"（{info['hint']}）"
             return jsonify({"ok": False, "need_2fa": True, "err": msg,
-                            "hint": info.get("hint")}), 400
+                            "hint": info.get("hint"), "channel": chan,
+                            "flag": info.get("flag")}), 400
         except LoginError as e2:
             _login_state["session"] = None
             return jsonify({"ok": False, "err": f"触发二次验证失败：{e2}"}), 400
@@ -243,7 +248,8 @@ def api_login_password():
                             "captcha_url": "/api/login/captcha"}), 400
         _login_state["session"] = None
         return jsonify({"ok": False, "err": str(e), "code": e.code}), 400
-    _login_state.update(session=None, captcha_url=None, username=None, **{"2fa_context": None})
+    _login_state.update(session=None, captcha_url=None, username=None,
+                        **{"2fa_context": None, "2fa_flag": None})
     if not sess.get("service_token"):
         return jsonify({"ok": False, "err": "登录成功但未取得 serviceToken（可能需要二次验证）"}), 400
     _apply_session(sess)

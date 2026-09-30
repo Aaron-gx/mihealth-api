@@ -214,119 +214,96 @@ IDENTITY = "https://account.xiaomi.com/identity"
 
 
 def start_2fa(session, notification_url, sid=SID_HEALTH, locale="zh_CN"):
-    """触发二次验证码（邮箱/短信）。返回 {context, hint}，context 给 finish_2fa 用。"""
-    from urllib.parse import parse_qs, urlparse
-    _req(session, "get", notification_url)
-    ctx = parse_qs(urlparse(notification_url).query).get("context", [""])[0]
-    _req(session, "get", f"{IDENTITY}/list",
-         params={"sid": sid, "context": ctx, "_locale": locale})
-    r = _req(session, "post", f"{IDENTITY}/auth/sendEmailTicket",
-             params={"_dc": str(int(time.time() * 1000)), "sid": sid, "context": ctx,
-                     "mask": "0", "_locale": locale},
-             data={"retry": "0", "icode": "", "_json": "true",
-                   "ick": session.cookies.get("ick", "")})
-    try:
-        j = r.json()
-    except Exception:
-        j = {}
-    return {"context": ctx,
-            "hint": j.get("notification") or j.get("mask") or j.get("email") or "",
-            "raw": j}
+    """触发二次验证码。返回 {context, flag, method, hint}，给 finish_2fa 用。
 
-
-def finish_2fa(session, code, context, sid=SID_HEALTH, locale="zh_CN"):
-    """提交二次验证码并走完换票：verifyEmail → (result/check) → auth2/end →
-    extension-pragma(ssecurity) → STS(serviceToken)。
-
-    坑：跳转地址通常在 **verifyEmail 的响应体**里（JSON 的 location 字段），
-    直接去问 result/check 会拿不到；这里按 响应体 → 响应头 → 正文正则 → result/check
-    的顺序取。
+    实测要点（`identity/list` 的 flag 决定通道：**4=手机短信，8=邮箱**）：
+      GET  authStart(notificationUrl)           建立验证会话
+      GET  /identity/list?context=...&supportedMask=0   → flag
+      GET  /identity/auth/verify{Phone|Email}?_flag=<flag>&_json=true   触发
+      POST /identity/auth/sendPhoneTicket (手机时)       真正下发短信
+    此前按固定"邮箱"通道实现，账号要求 flag=4 时会返回
+      {"code":2,"flag":4,"options":[4],"option":4} —— 即"请改用手机验证"。
     """
-    r = _req(session, "post", f"{IDENTITY}/auth/verifyEmail",
-             params={"_flag": "8", "_json": "true", "sid": sid, "context": context,
-                     "mask": "0", "_locale": locale},
-             data={"_flag": "8", "ticket": code, "trust": "false", "_json": "true",
-                   "ick": session.cookies.get("ick", "")})
+    from urllib.parse import parse_qs, urlparse
+    if not notification_url.startswith("http"):
+        notification_url = ACCOUNT_HOST + notification_url
+    _req(session, "get", notification_url)
+    q = parse_qs(urlparse(notification_url).query)
+    ctx = (q.get("context") or [""])[0]
+    sid = (q.get("sid") or [sid])[0]
 
-    def _loc_from(resp):
-        if resp is None:
-            return None
-        if resp.headers.get("Location"):
-            return resp.headers["Location"]
-        try:
-            j = resp.json() or {}
-        except Exception:
-            j = {}
-        for k in ("location", "url", "redirectUrl"):
-            if j.get(k):
-                return j[k]
-        for k in ("data", "result"):
-            if isinstance(j.get(k), dict) and j[k].get("location"):
-                return j[k]["location"]
-        m = re.search(r"https://account\.xiaomi\.com/(?:identity/result/check|pass/serviceLoginAuth2/end)\?[^\"'\s]+",
-                      resp.text or "")
-        return m.group(0) if m else None
-
-    finish = _loc_from(r)
-
-    # 明确错误码（如 87001 验证码错误）不要吞掉
+    r = _req(session, "get", f"{IDENTITY}/list",
+             params={"sid": sid, "supportedMask": "0", "_locale": locale, "context": ctx})
     try:
-        jr = r.json() or {}
+        idata = r.json() or {}
     except Exception:
-        jr = {}
-    if not finish and jr.get("code") in (87001, 70014, 70012):
-        raise LoginError(f"验证码校验未通过（code={jr.get('code')} {jr.get('desc') or ''}）",
-                         code=jr.get("code"), raw=jr)
+        idata = {}
+    flag = idata.get("flag", 4)
+    method = "Email" if flag == 8 else "Phone"
 
-    if not finish:      # 回退：直接问 result/check
-        r2 = _req(session, "get", f"{IDENTITY}/result/check",
-                  params={"sid": sid, "context": context, "_locale": locale},
-                  allow_redirects=False)
-        finish = _loc_from(r2)
+    _req(session, "get", f"{IDENTITY}/auth/verify{method}",
+         params={"_flag": str(flag), "_json": "true"})
+    if method == "Phone":       # 手机通道需要真正触发下发
+        _req(session, "post", f"{IDENTITY}/auth/sendPhoneTicket",
+             data={"retry": "0", "icode": "", "_json": "true"})
 
-    if not finish:
-        snippet = (r.text or "")[:300]
-        raise LoginError(f"验证码校验后未拿到跳转地址（verifyEmail 响应：{snippet!r}）",
-                         raw=jr)
+    hint = ""
+    for k in ("mask", "notification", "email", "phone", "address"):
+        if idata.get(k):
+            hint = idata[k]
+            break
+    return {"context": ctx, "flag": flag, "method": method, "hint": hint, "raw": idata}
 
-    if "identity/result/check" in finish:
-        hop = _req(session, "get", finish, allow_redirects=False)
-        end_url = hop.headers.get("Location")
-    else:
-        end_url = finish
-    if not end_url:
-        raise LoginError("未取得 Auth2/end 地址")
-    r2 = _req(session, "get", end_url, allow_redirects=False)
-    if r2.status_code == 200 and "Xiaomi Account - Tips" in (r2.text or ""):
-        r2 = _req(session, "get", end_url, allow_redirects=False)
-    ssecurity = None
-    ep = r2.headers.get("extension-pragma")
-    if ep:
-        try:
-            ssecurity = (json.loads(ep) or {}).get("ssecurity")
-        except Exception:
-            pass
-    if not ssecurity:
-        raise LoginError("Auth2/end 未返回 ssecurity（验证码可能不正确）")
 
-    sts = r2.headers.get("Location")
-    if not sts and r2.text:
-        i = r2.text.find("https://sts")
-        if i >= 0:
-            j = r2.text.find('"', i)
-            sts = r2.text[i:j if j > 0 else i + 300]
+def finish_2fa(session, code, context, flag=4, sid=SID_HEALTH, locale="zh_CN"):
+    """提交二次验证码并完成登录。
+
+    POST /identity/auth/verify{Phone|Email}?_dc=<ms>  {_flag, ticket, trust:false}
+      → 响应里的 location 先访问一次（建立已认证会话）
+      → **重做 serviceLogin**（此时返回 code=0，带 ssecurity/passToken/location）
+      → 跟随 STS 回调拿 serviceToken
+    """
+    method = "Email" if flag == 8 else "Phone"
+    r = _req(session, "post", f"{IDENTITY}/auth/verify{method}",
+             params={"_dc": str(int(time.time() * 1000))},
+             data={"_flag": str(flag), "ticket": code.strip(),
+                   "trust": "false", "_json": "true"})
+    try:
+        vresp = r.json() or {}
+    except Exception:
+        vresp = {}
+    if vresp.get("code") not in (0, None) and not vresp.get("location"):
+        raise LoginError(f"验证码校验未通过（code={vresp.get('code')} {vresp.get('desc') or ''}）",
+                         code=vresp.get("code"), raw=vresp)
+    loc = vresp.get("location") or r.headers.get("Location")
+    if not loc:
+        raise LoginError(f"验证码校验后未拿到跳转地址（响应：{json.dumps(vresp, ensure_ascii=False)[:200]}）",
+                         raw=vresp)
+    if not loc.startswith("http"):
+        loc = ACCOUNT_HOST + loc
+    _req(session, "get", loc)          # 访问一次，建立已认证会话
+
+    # 会话已认证：重做 serviceLogin 拿 ssecurity / passToken / STS 地址
+    r3 = _req(session, "get", f"{ACCOUNT_HOST}/pass/serviceLogin",
+              params={"sid": sid, "_json": "true"})
+    j3 = _json_body(r3.text)
+    if j3.get("code") != 0 or not j3.get("ssecurity"):
+        raise LoginError(f"二次验证后登录未完成（code={j3.get('code')} {j3.get('desc') or ''}）",
+                         code=j3.get("code"), raw=j3)
+
     token = None
-    if sts:
-        r3 = _req(session, "get", sts, allow_redirects=True)
-        token = session.cookies.get("serviceToken")
+    if j3.get("location"):
+        r4 = _req(session, "get", j3["location"], allow_redirects=False)
+        token = (session.cookies.get("serviceToken", domain="sts-hlth.io.mi.com")
+                 or session.cookies.get("serviceToken"))
         if not token:
-            m = re.search(r"serviceToken=([^;]+)", r3.headers.get("Set-Cookie", ""))
+            m = re.search(r"serviceToken=([^;]+)", r4.headers.get("Set-Cookie", ""))
             token = m.group(1) if m else None
-    return {"ssecurity": ssecurity, "service_token": token,
-            "cuser_id": session.cookies.get("cUserId") or session.cookies.get("userId"),
-            "user_id": session.cookies.get("userId"),
-            "pass_token": session.cookies.get("passToken"), "sid": sid,
-            "ts": int(time.time())}
+    return {"ssecurity": j3.get("ssecurity"), "service_token": token,
+            "cuser_id": j3.get("cUserId") or session.cookies.get("cUserId"),
+            "user_id": j3.get("userId") or session.cookies.get("userId"),
+            "pass_token": j3.get("passToken") or session.cookies.get("passToken"),
+            "sid": sid, "ts": int(time.time())}
 
 
 def _device_id():
