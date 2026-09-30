@@ -235,27 +235,59 @@ def start_2fa(session, notification_url, sid=SID_HEALTH, locale="zh_CN"):
 
 
 def finish_2fa(session, code, context, sid=SID_HEALTH, locale="zh_CN"):
-    """提交二次验证码并走完换票：verifyEmail → result/check → auth2/end →
-    extension-pragma(ssecurity) → STS(serviceToken)。"""
-    _req(session, "post", f"{IDENTITY}/auth/verifyEmail",
-         params={"_flag": "8", "_json": "true", "sid": sid, "context": context,
-                 "mask": "0", "_locale": locale},
-         data={"_flag": "8", "ticket": code, "trust": "false", "_json": "true",
-               "ick": session.cookies.get("ick", "")})
-    r = _req(session, "get", f"{IDENTITY}/result/check",
-             params={"sid": sid, "context": context, "_locale": locale},
-             allow_redirects=False)
-    finish = None
-    if r.status_code in (301, 302) and r.headers.get("Location"):
-        finish = r.headers["Location"]
-    else:
+    """提交二次验证码并走完换票：verifyEmail → (result/check) → auth2/end →
+    extension-pragma(ssecurity) → STS(serviceToken)。
+
+    坑：跳转地址通常在 **verifyEmail 的响应体**里（JSON 的 location 字段），
+    直接去问 result/check 会拿不到；这里按 响应体 → 响应头 → 正文正则 → result/check
+    的顺序取。
+    """
+    r = _req(session, "post", f"{IDENTITY}/auth/verifyEmail",
+             params={"_flag": "8", "_json": "true", "sid": sid, "context": context,
+                     "mask": "0", "_locale": locale},
+             data={"_flag": "8", "ticket": code, "trust": "false", "_json": "true",
+                   "ick": session.cookies.get("ick", "")})
+
+    def _loc_from(resp):
+        if resp is None:
+            return None
+        if resp.headers.get("Location"):
+            return resp.headers["Location"]
         try:
-            finish = (r.json() or {}).get("location")
+            j = resp.json() or {}
         except Exception:
-            m = re.search(r"https://account\.xiaomi\.com/identity/result/check\?[^\"']+", r.text or "")
-            finish = m.group(0) if m else None
+            j = {}
+        for k in ("location", "url", "redirectUrl"):
+            if j.get(k):
+                return j[k]
+        for k in ("data", "result"):
+            if isinstance(j.get(k), dict) and j[k].get("location"):
+                return j[k]["location"]
+        m = re.search(r"https://account\.xiaomi\.com/(?:identity/result/check|pass/serviceLoginAuth2/end)\?[^\"'\s]+",
+                      resp.text or "")
+        return m.group(0) if m else None
+
+    finish = _loc_from(r)
+
+    # 明确错误码（如 87001 验证码错误）不要吞掉
+    try:
+        jr = r.json() or {}
+    except Exception:
+        jr = {}
+    if not finish and jr.get("code") in (87001, 70014, 70012):
+        raise LoginError(f"验证码校验未通过（code={jr.get('code')} {jr.get('desc') or ''}）",
+                         code=jr.get("code"), raw=jr)
+
+    if not finish:      # 回退：直接问 result/check
+        r2 = _req(session, "get", f"{IDENTITY}/result/check",
+                  params={"sid": sid, "context": context, "_locale": locale},
+                  allow_redirects=False)
+        finish = _loc_from(r2)
+
     if not finish:
-        raise LoginError("验证码校验后未拿到跳转地址（验证码可能不正确）")
+        snippet = (r.text or "")[:300]
+        raise LoginError(f"验证码校验后未拿到跳转地址（verifyEmail 响应：{snippet!r}）",
+                         raw=jr)
 
     if "identity/result/check" in finish:
         hop = _req(session, "get", finish, allow_redirects=False)
