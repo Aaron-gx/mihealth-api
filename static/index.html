@@ -73,7 +73,10 @@ input{padding:8px;border:1px solid var(--bd);border-radius:8px;font-size:13px;wi
         <input id="lgPass" type="password" placeholder="密码">
         <div id="lgCapWrap" style="display:none">
           <img id="lgCapImg" style="max-width:100%;border-radius:8px" alt="验证码">
-          <input id="lgCap" placeholder="输入验证码" style="margin-top:6px">
+          <input id="lgCap" placeholder="输入图片验证码" style="margin-top:6px">
+        </div>
+        <div id="lg2faWrap" style="display:none">
+          <input id="lg2fa" placeholder="输入邮箱/短信收到的验证码" style="margin-top:6px">
         </div>
         <button id="btnPwdLogin" class="pbtn">登录</button>
       </div>
@@ -304,9 +307,11 @@ const LM={open(){ $('loginModal').style.display='block'; LM.state(); },
         body:body?JSON.stringify(body):null});
       const d=await r.json();
       if(d.ok){ LM.msg('成功：'+(d.mode||'')+' token='+(d.token_prefix||'')+(d.pass_token_saved?' · 已保存 passToken（可免密续期）':''));
+        $('lgCapWrap').style.display=$('lg2faWrap').style.display='none';
         LM.state(); loadHealth(); loadAll(); }
-      else { LM.msg('失败：'+(d.err||'未知')+(d.captcha_url?'（需要验证码）':''),true);
-        if(d.captcha_url){ $('lgCapWrap').style.display='block'; $('lgCapImg').src=d.captcha_url; } }
+      else { LM.msg((d.need_2fa?'':'失败：')+(d.err||'未知')+(d.captcha_url?'（请填图片验证码）':''),true);
+        if(d.captcha_url){ $('lgCapWrap').style.display='block'; $('lgCapImg').src=d.captcha_url; }
+        if(d.need_2fa){ $('lg2faWrap').style.display='block'; $('btnPwdLogin').textContent='提交验证码'; } }
     }catch(e){ LM.msg('请求出错：'+e,true); }
     if(btn){btn.disabled=false;}
   }
@@ -315,7 +320,9 @@ $('btnLogin').onclick=()=>LM.open();
 $('btnLoginClose').onclick=()=>LM.close();
 $('btnRefreshToken').onclick=e=>LM.call('/api/login/refresh',null,e.target);
 $('btnImportDev').onclick=e=>LM.call('/api/login/import_device',null,e.target);
-$('btnPwdLogin').onclick=e=>LM.call('/api/login',{username:$('lgUser').value,password:$('lgPass').value,captcha:$('lgCap').value},e.target);
+$('btnPwdLogin').onclick=e=>LM.call('/api/login',
+  {username:$('lgUser').value,password:$('lgPass').value,
+   captcha:$('lgCap').value,code:$('lg2fa').value}, e.target);
 
 $('sportType').onchange=loadAll;
 $('reload').onclick=loadAll;$('range').onchange=loadAll;

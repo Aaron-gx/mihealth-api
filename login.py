@@ -186,8 +186,7 @@ def login_with_password(username, password, sid=SID_HEALTH, captcha=None, ick=No
     # 需要二次验证（邮件/短信）
     if not (isinstance(j2.get("ssecurity"), str) and len(j2["ssecurity"]) > 4):
         if j2.get("notificationUrl"):
-            raise LoginError("账号需要二次验证（2FA）：请在手机/邮箱完成验证后改用「从设备导入」或设置应用密码",
-                             code=j2.get("code"), raw=j2)
+            raise Need2FA(j2["notificationUrl"], raw=j2)
         raise LoginError(j2.get("desc") or f"登录失败 code={j2.get('code')}",
                          code=j2.get("code"), captcha_url=None, raw=j2)
 
@@ -202,6 +201,100 @@ def login_with_password(username, password, sid=SID_HEALTH, captcha=None, ick=No
     return {"ssecurity": j2.get("ssecurity"), "service_token": token,
             "cuser_id": j2.get("cUserId"), "user_id": j2.get("userId"),
             "pass_token": j2.get("passToken"), "sid": sid, "ts": int(time.time())}
+
+
+class Need2FA(LoginError):
+    """账号需要二次验证：start_2fa 触发验证码 → finish_2fa 提交。"""
+    def __init__(self, notification_url, raw=None):
+        super().__init__("账号需要二次验证（2FA）", raw=raw)
+        self.notification_url = notification_url
+
+
+IDENTITY = "https://account.xiaomi.com/identity"
+
+
+def start_2fa(session, notification_url, sid=SID_HEALTH, locale="zh_CN"):
+    """触发二次验证码（邮箱/短信）。返回 {context, hint}，context 给 finish_2fa 用。"""
+    from urllib.parse import parse_qs, urlparse
+    _req(session, "get", notification_url)
+    ctx = parse_qs(urlparse(notification_url).query).get("context", [""])[0]
+    _req(session, "get", f"{IDENTITY}/list",
+         params={"sid": sid, "context": ctx, "_locale": locale})
+    r = _req(session, "post", f"{IDENTITY}/auth/sendEmailTicket",
+             params={"_dc": str(int(time.time() * 1000)), "sid": sid, "context": ctx,
+                     "mask": "0", "_locale": locale},
+             data={"retry": "0", "icode": "", "_json": "true",
+                   "ick": session.cookies.get("ick", "")})
+    try:
+        j = r.json()
+    except Exception:
+        j = {}
+    return {"context": ctx,
+            "hint": j.get("notification") or j.get("mask") or j.get("email") or "",
+            "raw": j}
+
+
+def finish_2fa(session, code, context, sid=SID_HEALTH, locale="zh_CN"):
+    """提交二次验证码并走完换票：verifyEmail → result/check → auth2/end →
+    extension-pragma(ssecurity) → STS(serviceToken)。"""
+    _req(session, "post", f"{IDENTITY}/auth/verifyEmail",
+         params={"_flag": "8", "_json": "true", "sid": sid, "context": context,
+                 "mask": "0", "_locale": locale},
+         data={"_flag": "8", "ticket": code, "trust": "false", "_json": "true",
+               "ick": session.cookies.get("ick", "")})
+    r = _req(session, "get", f"{IDENTITY}/result/check",
+             params={"sid": sid, "context": context, "_locale": locale},
+             allow_redirects=False)
+    finish = None
+    if r.status_code in (301, 302) and r.headers.get("Location"):
+        finish = r.headers["Location"]
+    else:
+        try:
+            finish = (r.json() or {}).get("location")
+        except Exception:
+            m = re.search(r"https://account\.xiaomi\.com/identity/result/check\?[^\"']+", r.text or "")
+            finish = m.group(0) if m else None
+    if not finish:
+        raise LoginError("验证码校验后未拿到跳转地址（验证码可能不正确）")
+
+    if "identity/result/check" in finish:
+        hop = _req(session, "get", finish, allow_redirects=False)
+        end_url = hop.headers.get("Location")
+    else:
+        end_url = finish
+    if not end_url:
+        raise LoginError("未取得 Auth2/end 地址")
+    r2 = _req(session, "get", end_url, allow_redirects=False)
+    if r2.status_code == 200 and "Xiaomi Account - Tips" in (r2.text or ""):
+        r2 = _req(session, "get", end_url, allow_redirects=False)
+    ssecurity = None
+    ep = r2.headers.get("extension-pragma")
+    if ep:
+        try:
+            ssecurity = (json.loads(ep) or {}).get("ssecurity")
+        except Exception:
+            pass
+    if not ssecurity:
+        raise LoginError("Auth2/end 未返回 ssecurity（验证码可能不正确）")
+
+    sts = r2.headers.get("Location")
+    if not sts and r2.text:
+        i = r2.text.find("https://sts")
+        if i >= 0:
+            j = r2.text.find('"', i)
+            sts = r2.text[i:j if j > 0 else i + 300]
+    token = None
+    if sts:
+        r3 = _req(session, "get", sts, allow_redirects=True)
+        token = session.cookies.get("serviceToken")
+        if not token:
+            m = re.search(r"serviceToken=([^;]+)", r3.headers.get("Set-Cookie", ""))
+            token = m.group(1) if m else None
+    return {"ssecurity": ssecurity, "service_token": token,
+            "cuser_id": session.cookies.get("cUserId") or session.cookies.get("userId"),
+            "user_id": session.cookies.get("userId"),
+            "pass_token": session.cookies.get("passToken"), "sid": sid,
+            "ts": int(time.time())}
 
 
 def _device_id():
