@@ -1,27 +1,26 @@
-# 小米运动健康 (com.mi.health) API 侦查记录
+# 小米运动健康 (com.mi.health) 接口与数据笔记
 
-样本: base.apk v3.59.0 (versionCode 359000), 13 dex, 无加固(R8 混淆), arm64 .so 含 libdevice-encrypt.so。
+客户端版本: v3.59.0 (versionCode 359000)。
 
 ## 目标
-拿到个人健康数据接口，用于自己的项目。
+把个人健康数据接入自己的项目（同步到本地、可查询、可视化）。
 
 ## 云端架构（已确认）
 
-- **Host**: `https://hlth.io.mi.com/`（`FitnessApiService.HTTP_HOST`, `AppModule.provideHttpConfig`）
-- **Path prefix**: `app/v1/`（`FitnessApiService.HTTP_PATH`）
-- **区域变体**: `region.hlth.io.mi.com`（RegionUrlSwitcher 可改写 host/secret；OAuth 回调走此域）
+- **Host**: `https://hlth.io.mi.com/`
+- **Path prefix**: `app/v1/`
+- **区域变体**: `region.hlth.io.mi.com`（区域可切换；OAuth 回调走此域）
 - **认证**: HTTP Cookie `.hlth.io.mi.com` 域: `serviceToken=...; cUserId=...; locale=...`
-  （`AccountServiceCookieImpl.plantHealthCookie`；`ParameterInterceptor` 只追加 locale）
-- **Token 来源**: 小米账号 serviceToken（`com.xiaomi.passport.servicetoken.ServiceTokenResult` → serviceToken/security/cUserId/userId），
-  `TokenManagerImpl.getServiceToken(sid)`，sid 由远程登录组件下发（未静态确认，动态时抓）
+  （客户端在响应域写入 Cookie，请求侧仅追加 locale）
+- **Token 来源**: 小米账号 serviceToken（serviceToken / security / cUserId / userId 四要素）
 - **签名层**（仅 `@Secret` 注解接口用；数据接口未发现 @Secret → 可能是纯 Cookie）:
-  - CloudInterceptor 对匹配 URL 注入 `signature`, `rc4_hash__`, `_nonce`
+  - 匹配的接口在 URL/表单中注入 `signature`, `rc4_hash__`, `_nonce`
   - `_nonce` = base64(8B 随机 + 4B 分钟级时间戳+timeDiff)
   - RC4 会话密钥 = base64(SHA256(b64decode(ssecurity) + b64decode(nonce)))，32B，RC4-drop1024
   - 加密请求: 值做 RC4 加密 + signature=SHA1(METHOD&path&k=v...&sessionKey)
   - 非加密请求: signature=HmacSHA256(subpath&sessionKey&nonce&k=v..., sessionKey)
   - 响应按 `encryptResponse` 用同一密钥 RC4 解密
-  - 类映射: zi4(顶层) di4(签名/nonce) xj4(b64/sha256) ffc(hmac) o0l(rc4) u82(b64) m0l(rc4引擎)
+
 
 ## 数据端点（POST `data/`、GET `data/` 均为 `data=<json>` 参数风格待动态确认）
 
@@ -64,7 +63,7 @@ vo2_max, menstruation
 - `huami OAuth`: `user.huami.com/oauth2` client_id=v2N0da410c4d77c4d2fa8b3cd5e4d08ec2b（绑定华米账号导入数据用）
 - `thirdparty/auth/token`, `thirdparty/refresh/token`（三方授权）
 
-## 待动态确认
+## 待确认
 
 1. serviceToken 的 sid 名（Frida hook `TokenManagerImpl.getServiceToken`）
 2. `data=` 参数的确切序列化（GET query or POST form；gson JSON 无空格）

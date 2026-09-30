@@ -3,9 +3,9 @@
 | 项 | 值 |
 |---|---|
 | 文档版本 | 1.0 |
-| 逆向对象 | 小米运动健康 `com.mi.health` v3.59.0 (versionCode 359000) |
-| 协议验证 | 雷电模拟器实机登录验证（2026-09-29），Python 客户端实测打通 |
-| 性质 | App 内部 API（非官方开放 API）。凭证=登录态 Cookie，仅供**本人数据**使用 |
+| 目标客户端 | 小米运动健康 `com.mi.health` v3.59.0 (versionCode 359000) |
+| 验证环境 | Android 模拟器实机登录验证 + Python 客户端实测打通 |
+| 性质 | 客户端接口（非官方开放 API）。凭证=登录态 Cookie，仅供**本人数据**使用 |
 | Base URL | `https://hlth.io.mi.com/app/v1/` |
 | 传输 | HTTPS + OkHttp；请求/响应参数级加密（RC4），认证 Cookie |
 
@@ -17,9 +17,9 @@
 
 | 凭据 | 取值 | 来源 |
 |---|---|---|
-| `ssecurity` | `***REMOVED***` | WebView Cookie 库 `.wear.mi.com.internal.yrn.net` 行 `ssecurity` |
-| `serviceToken` | `<redacted-service-token>` | Cookie 库 `sts-hlth.io.mi.com` 行 `serviceToken` |
-| `cUserId` | `***REMOVED***` | 同上 `cUserId`；另有明文 `userId=***REMOVED***` |
+| `ssecurity` | `<ssecurity>`（每次登录会话都会变） | WebView Cookie 库 `.wear.mi.com.internal.yrn.net` 行 `ssecurity` |
+| `serviceToken` | `<serviceToken>`（长串 base64） | Cookie 库 `sts-hlth.io.mi.com` 行 `serviceToken` |
+| `cUserId` | `<cUserId>` | 同上 `cUserId`；另有明文 `userId=<userId>` |
 
 提取（root 设备，SQLite）：
 
@@ -139,7 +139,7 @@ plaintext_body = RC4(sessionKey, b64decode(http_body))   # UTF-8 JSON
 **fitness 返回项结构**：
 
 ```json
-{"sid":"hlth.gen_...|***REMOVED***|xiaomisports_app",
+{"sid":"hlth.gen_... | <设备sid> | xiaomisports_app",
  "key":"steps","time":1790651460,
  "value":"<内嵌JSON字符串>","zone_offset":28800,
  "zone_name":"Asia/Shanghai","update_time":...,"watermark":...}
@@ -274,7 +274,7 @@ heel_landing_duration/golpe_landing_duration/max_contact_time`
 
 ---
 
-## 4.9 账号登录（passport → STS，实测打通）
+## 4.9 账号登录（passport → STS）
 
 网页端/CLI 都可以用小米账号登录换取米健康 `serviceToken`，不必依赖 App。
 
@@ -295,7 +295,7 @@ heel_landing_duration/golpe_landing_duration/max_contact_time`
 ④ 用 {ssecurity, serviceToken, cUserId} 调 app/v1 接口（第 2 章协议）✅ 实测 code:0
 ```
 
-**密码哈希：单次 MD5 大写。** 反编译 `XMPassport.loginByPassword`：
+**密码哈希：单次 MD5 大写。** `XMPassport.loginByPassword` 的实现：
 
 ```java
 if (XMPassportSettings.getPassWordEncryptor() == null)      // 无 EUI 加密器时的明文回退路径
@@ -435,8 +435,8 @@ base64 是纯文本、对行规则免疫；兜底方案是 `su -c cp` 到 `/data
 **多维组合示例**
 
 ```bash
-# 某数据源（手表 ***REMOVED***）的步数·近 7 天·倒序
-/api/db/fitness?key=steps&sid=***REMOVED***&start=<ms>&order=desc&limit=100
+# 某数据源（手表 sid）的步数·近 7 天·倒序
+/api/db/fitness?key=steps&sid=<设备sid>&start=<ms>&order=desc&limit=100
 # 全历史每日步数合计（服务端聚合，不解码行）
 /api/agg/fitness/steps?field=steps&agg=sum&bucket=86400
 # 每周最高心率
@@ -490,9 +490,9 @@ C.get_sport_records_by_time(start_ms, end_ms)
 
 - **分钟级心率约 1215/天**：手环正常佩戴下的采样密度（全天佩戴）。
 - **步数/卡路里 value 是分钟增量**，非累计值；聚合请自行累加或乘时段。
-- **`nextKey`（驼峰）在 `data` 参数体内被忽略**（服务端按 `next_key` 解析）。这是逆向比对 jadx 类字段名与线上行为的结论——客户端 bean 叫 `nextKey`，服务端只认 `next_key`。SDK 里 Gson 会按声明名序列化，可能服务端兼容双写，但实测只 `next_key` 生效。
+- **`nextKey`（驼峰）在 `data` 参数体内被忽略**（服务端按 `next_key` 解析）：客户端字段名写作 `nextKey`，但实际生效的是 `next_key`；按 `next_key` 传游标，否则每页都返回第一页。
 - **relatives / latest / watermark** 按 phoneId 归属：本机 `device_info.default_id` 提取的 phoneId 对 wm 接口返回空（尚未同步表），属正常——以 `next_key` 翻页路径为准。
 
 ---
 
-*本文件由逆向工程产生，字段名以反编译代码（com.xiaomi.fitness.* / com.xiaomi.fit.fitness.*）为权威；实测值见 `work/API.md` 历次验证。*
+*字段名以客户端行为为参考、以实测为准；示例中的长串凭据均以占位符表示。*

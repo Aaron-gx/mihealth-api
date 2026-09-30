@@ -1,15 +1,16 @@
 # mihealth-api
 
-小米运动健康（`com.mi.health`，Mi Fitness）云端健康数据 API — 逆向实现。
+小米运动健康（`com.mi.health`，Mi Fitness）个人健康数据工具。
 
-通过还原 App 内部接口的认证与加密协议，调用其云端服务获取个人健康数据。
+把**自己账号**里的健康数据同步到本地，提供 HTTP 接口与数据看板：
+账号登录换取访问凭据 → 按时间窗/增量拉取 → SQLite 归档 → 多维查询与可视化。
 
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.9%2B-blue)](#)
 
 ## 用途
 
-为需要访问**本人**小米运动健康云端数据的场景提供可编程通道：个人数据备份与导出、接入自建项目/仪表板、与第三方工具（Home Assistant、Obsidian、Grafana 等）做数据集成、接口逆向研究与学习。
+为需要访问**本人**小米运动健康数据的场景提供可编程通道：个人数据备份与导出、接入自建项目/仪表板、与第三方工具（Home Assistant、Obsidian、Grafana 等）做数据集成、接口与数据格式研究。
 
 - 仅供访问**使用者自己账号**名下的数据；需先在登录态设备上提取凭据（见下文）
 - 与小米公司无任何关联，不是官方开放 API（官方通道为 `pv.hlthopen.io.mi.com`，需注册 OAuth client_id）
@@ -108,7 +109,7 @@ python tools/refresh_credentials.py                  # 从设备导入（含 pas
 > 落盘内容只有 `ssecurity / service_token / cuser_id / user_id / pass_token / session_at`（`config.json`，权限 600）。
 > 注意 `ssecurity` **每次会话都会变**，必须与同次会话的 token 配套使用。
 
-**密码登录实现细节**（照 SDK 反编译 + 社区在用实现，每一环都踩过坑）：
+**登录实现要点**（与客户端行为保持一致，每一环都踩过坑）：
 
 | 环节 | 正确做法 | 错的后果 |
 |---|---|---|
@@ -194,7 +195,7 @@ adb shell su -c "sqlite3 /data/data/com.mi.health/app_webview/Default/Cookies \
 | `statistics/get_stat_data_by_time` | 参数对齐后仍为空集，本账号无对应功能数据 |
 | GPS 轨迹 / 饮食记录 | 接口齐备，但本账号云端无数据（未开 GPS / 未用饮食记录） |
 
-## 协议还原
+## 请求签名与加密
 
 ```
 nonce       = b64( random(8B) | int32(minutes_since_epoch) )
@@ -231,16 +232,16 @@ tools/
   export_all.py           # 全量导出 JSON
   dump_tokens.js          # Frida hook 现场抓 token
 API.md               # 接口文档
-RECON.md             # 逆向侦查记录
+NOTES.md             # 接口与数据结构笔记
 config.example.json  # 凭据模板
 ```
 
-## 逆向依据
+## 实现说明
 
-- 样本：`com.mi.health` v3.59.0（13 dex，R8 混淆，无加固）
-- 签名链：`com.xiaomi.fitness.app.CloudInterceptor` → `zi4 / di4 / xj4 / ffc / o0l / u82`
-- 数据层：`com.xiaomi.fit.fitness.persist.server.FitnessApiService`（host/path/注解）
-- 键映射：`CloudKey.getCloudRequestKey`；摘要：`CloudRainbowHelper → daily_fitness/goal`
+- 数据来自小米运动健康账号的云端服务（`hlth.io.mi.com`），凭证为登录态 Cookie
+- 请求签名与加密按客户端行为实现：`nonce`（随机 + 分钟时间戳）→ `SHA256` 会话密钥 → `RC4`（丢弃前 1024 字节）
+- 接口清单、参数与数据结构见 [API.md](API.md)；接口行为与坑位见其中的"接口行为要点"
+- 只读使用：本工具不修改账号数据（仅同步/查询）
 
 ## License
 
