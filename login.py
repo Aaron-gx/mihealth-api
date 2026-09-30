@@ -39,9 +39,14 @@ class LoginError(Exception):
 
 
 def _json_body(text):
-    """passport 的 JSON 响应前面常有 '&&&START&&&' 前缀。"""
-    i = text.find("{")
-    return json.loads(text[i:]) if i >= 0 else {}
+    """passport/identity 的 JSON 响应前面常带 '&&&START&&&' 前缀（r.json() 会解析失败）。"""
+    i = (text or "").find("{")
+    if i < 0:
+        return {}
+    try:
+        return json.loads(text[i:])
+    except Exception:
+        return {}
 
 
 def _req(session, method, url, tries=3, **kw):
@@ -272,10 +277,7 @@ def start_2fa(session, notification_url, sid=SID_HEALTH, locale="zh_CN"):
 
     r = _id_call(session, "get", f"{IDENTITY}/list", "identity/list",
                  params={"sid": sid, "supportedMask": "0", "_locale": locale, "context": ctx})
-    try:
-        idata = r.json() or {}
-    except Exception:
-        idata = {}
+    idata = _json_body(r.text)      # 注意 &&&START&&& 前缀，不能直接 r.json()
     flag = idata.get("flag", 4)
     method = "Email" if flag == 8 else "Phone"
 
@@ -307,10 +309,7 @@ def finish_2fa(session, code, context, flag=4, sid=SID_HEALTH, locale="zh_CN"):
                          "_json": "true", "sid": sid, "context": context},
                  data={"_flag": str(flag), "ticket": code.strip(),
                        "trust": "false", "_json": "true"})
-    try:
-        vresp = r.json() or {}
-    except Exception:
-        vresp = {}
+    vresp = _json_body(r.text)      # 同上：小米响应带 &&&START&&& 前缀
     if vresp.get("code") not in (0, None) and not vresp.get("location"):
         raise LoginError(f"验证码校验未通过（code={vresp.get('code')} {vresp.get('desc') or ''}）",
                          code=vresp.get("code"), raw=vresp)
