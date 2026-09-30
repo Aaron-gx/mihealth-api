@@ -274,6 +274,37 @@ heel_landing_duration/golpe_landing_duration/max_contact_time`
 
 ---
 
+## 4.9 账号登录（passport → STS，实测打通）
+
+网页端/CLI 都可以用小米账号登录换取米健康 `serviceToken`，不必依赖 App。
+
+```
+① GET  https://account.xiaomi.com/pass/serviceLogin?sid=miothealth&_json=true
+        → {_sign, qs, callback:"https://sts-hlth.io.mi.com/healthapp/sts", code:70016}
+   注：sid=miothealth 是米健康的服务标识，回调正是我们用的 STS 主机
+
+②a 免密：带 cookie {passToken, cUserId, userId} 重发 ①
+        → {code:0, ssecurity, cUserId, userId, location:"https://sts-hlth.io.mi.com/...?ticket=..."}
+②b 密码：POST serviceLoginAuth2  {user, hash, sid, _sign, qs, callback, [_json=true], [icode验证码], [deviceId]}
+        hash = MD5( MD5(password).upper() ).upper()      # XMPassport.loginByPassword 回退算法
+        → 同 ②a（首次还会返回 passToken）
+
+③ GET  location（不要跟随跳转）
+        → Set-Cookie: serviceToken=...   ← 米健康接口直接用这个
+
+④ 用 {ssecurity, serviceToken, cUserId} 调 app/v1 接口（第 2 章协议）✅ 实测 code:0
+```
+
+要点（都是实测踩出来的）：
+
+| 现象 | 结论 |
+|---|---|
+| 不带 cookie 的匿名 `serviceLogin` 也会返回 `location` | 但跟随后**拿不到 serviceToken**；必须带 `passToken` cookie 调用 |
+| STS 那一步 | 用 `allow_redirects=False`，从 `Set-Cookie` 读 `serviceToken` |
+| `ssecurity` 每次会话都变 | 新会话的 token 必须配新会话的 ssecurity（旧的不通用） |
+| `passToken` 有效期 | 约 1~2 个月，期间可反复免密换票（无密码、无设备） |
+| 密码 | 只用于 ②b 当次请求，不落盘；可能要求验证码（`captchaUrl`/`icode`） |
+
 ## 5. 凭证刷新与维护
 
 ### 5.1 token 过期后的恢复（实测流程）

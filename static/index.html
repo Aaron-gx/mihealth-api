@@ -35,6 +35,10 @@ td.mono{font-variant-numeric:tabular-nums}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
 @media(max-width:860px){.grid2{grid-template-columns:1fr}}
 .foot{color:var(--mut);font-size:11px;padding:8px 4px}
+.pbtn{background:var(--card);color:var(--fg);border:1px solid var(--bd);border-radius:8px;padding:7px 14px;font-size:13px;cursor:pointer}
+.pbtn:hover{border-color:var(--acc);color:var(--acc)}
+.pbtn:disabled{opacity:.5;cursor:default}
+input{padding:8px;border:1px solid var(--bd);border-radius:8px;font-size:13px;width:100%;box-sizing:border-box}
 </style>
 </head>
 <body>
@@ -49,9 +53,35 @@ td.mono{font-variant-numeric:tabular-nums}
     <option value="168" selected>近 7 天</option>
     <option value="720">近 30 天</option>
   </select>
+  <button id="btnLogin">登录</button>
   <button id="sync">同步</button>
   <button id="reload">刷新</button>
 </header>
+
+<div id="loginModal" style="display:none;position:fixed;inset:0;background:rgba(16,24,40,.45);z-index:50">
+  <div style="max-width:440px;margin:8vh auto;background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:20px">
+    <h3 style="margin:0 0 6px;font-size:16px">小米账号会话</h3>
+    <p class="hint" id="loginState" style="margin:0 0 14px"></p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+      <button id="btnRefreshToken" class="pbtn">免密续期</button>
+      <button id="btnImportDev" class="pbtn">从设备导入</button>
+    </div>
+    <details>
+      <summary class="hint" style="cursor:pointer">账号密码登录（首次用；密码只用于当次请求，不留存）</summary>
+      <div style="margin-top:10px;display:grid;gap:8px">
+        <input id="lgUser" placeholder="小米账号（手机号/邮箱/ID）">
+        <input id="lgPass" type="password" placeholder="密码">
+        <div id="lgCapWrap" style="display:none">
+          <img id="lgCapImg" style="max-width:100%;border-radius:8px" alt="验证码">
+          <input id="lgCap" placeholder="输入验证码" style="margin-top:6px">
+        </div>
+        <button id="btnPwdLogin" class="pbtn">登录</button>
+      </div>
+    </details>
+    <p class="hint" id="loginMsg" style="margin:12px 0 0"></p>
+    <div style="text-align:right;margin-top:12px"><button id="btnLoginClose" class="pbtn">关闭</button></div>
+  </div>
+</div>
 <div class="wrap">
   <div class="cards" id="cards"></div>
 
@@ -255,6 +285,38 @@ async function loadSportTypes(){
 const SPORT_KEY_CN={outdoor_running:'户外跑步',pool_swimming:'泳池游泳',outdoor_riding:'户外骑行',
   outdoor_walking:'户外步行',outdoor_hiking:'户外徒步',football:'足球',badminton:'羽毛球',
   frisbee:'飞盘',free_training:'自由训练',indoor_running:'室内跑步',jump_rope:'跳绳',walking:'步行'};
+// ---- 登录面板 ----
+const LM={open(){ $('loginModal').style.display='block'; LM.state(); },
+  close(){ $('loginModal').style.display='none'; $('loginMsg').textContent=''; },
+  msg(t,err){ $('loginMsg').textContent=t; $('loginMsg').style.color=err?'#dc2626':'#16a34a'; },
+  async state(){
+    try{ const s=await (await fetch('/api/login/status')).json();
+      const when=s.session_at?new Date(s.session_at*1000).toLocaleString():'未知';
+      $('loginState').textContent=`当前会话: ${s.can_refresh?'可免密续期':'仅当前 token（无 passToken）'} · 登录于 ${when} · 账号 ${s.user_id||'-'}`;
+      $('btnRefreshToken').disabled=!s.can_refresh;
+    }catch(e){ $('loginState').textContent='状态读取失败'; }
+  },
+  async call(url,body,btn){
+    if(btn){btn.disabled=true;}
+    LM.msg('处理中…');
+    try{
+      const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},
+        body:body?JSON.stringify(body):null});
+      const d=await r.json();
+      if(d.ok){ LM.msg('成功：'+(d.mode||'')+' token='+(d.token_prefix||'')+(d.pass_token_saved?' · 已保存 passToken（可免密续期）':''));
+        LM.state(); loadHealth(); loadAll(); }
+      else { LM.msg('失败：'+(d.err||'未知')+(d.captcha_url?'（需要验证码）':''),true);
+        if(d.captcha_url){ $('lgCapWrap').style.display='block'; $('lgCapImg').src=d.captcha_url; } }
+    }catch(e){ LM.msg('请求出错：'+e,true); }
+    if(btn){btn.disabled=false;}
+  }
+};
+$('btnLogin').onclick=()=>LM.open();
+$('btnLoginClose').onclick=()=>LM.close();
+$('btnRefreshToken').onclick=e=>LM.call('/api/login/refresh',null,e.target);
+$('btnImportDev').onclick=e=>LM.call('/api/login/import_device',null,e.target);
+$('btnPwdLogin').onclick=e=>LM.call('/api/login',{username:$('lgUser').value,password:$('lgPass').value,captcha:$('lgCap').value},e.target);
+
 $('sportType').onchange=loadAll;
 $('reload').onclick=loadAll;$('range').onchange=loadAll;
 loadHealth();loadSportTypes();loadAll();

@@ -564,6 +564,11 @@ def load_config(path=None):
         "ssecurity": cfg.get("ssecurity") or os.environ.get("MIH_SSECURITY"),
         "service_token": cfg.get("service_token") or os.environ.get("MIH_SERVICE_TOKEN"),
         "cuser_id": cfg.get("cuser_id") or os.environ.get("MIH_CUSER_ID"),
+        # session/refresh material (never a password):
+        "pass_token": cfg.get("pass_token") or os.environ.get("MIH_PASS_TOKEN"),
+        "user_id": cfg.get("user_id") or os.environ.get("MIH_USER_ID"),
+        "session_at": cfg.get("session_at"),
+        "sid": cfg.get("sid") or "miothealth",
         "region": cfg.get("region") or os.environ.get("MIH_REGION") or "cn",
         "host": cfg.get("host"),
         "auto_refresh": bool(cfg.get("auto_refresh")),

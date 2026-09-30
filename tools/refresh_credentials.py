@@ -15,7 +15,7 @@ to have been launched at least once with a signed-in account.
   python tools/refresh_credentials.py --print     # print only
   python tools/refresh_credentials.py --serial emulator-5554
 """
-import argparse, json, os, sqlite3, subprocess, sys, tempfile
+import argparse, json, os, sqlite3, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -133,7 +133,8 @@ def fetch_from_device(serial=None, adb=None):
     rows = db.execute("SELECT host_key,name,value FROM cookies").fetchall()
     db.close()
 
-    creds = {"service_token": None, "cuser_id": None, "ssecurity": None, "user_id": None}
+    creds = {"service_token": None, "cuser_id": None, "ssecurity": None,
+             "user_id": None, "pass_token": None}
     for host, name, value in rows:
         if host == TOKEN_HOST:
             if name == "serviceToken":
@@ -146,6 +147,13 @@ def fetch_from_device(serial=None, adb=None):
             creds["ssecurity"] = value
         elif name == "ssecurity" and host in SEC_HOSTS:
             creds["ssecurity"] = value
+        # passToken 能让服务端免密续期（无需模拟器/密码），务必一起带出来
+        if name == "passToken" and value:
+            creds["pass_token"] = value
+        if name == "cUserId" and not creds["cuser_id"]:
+            creds["cuser_id"] = value
+        if name == "userId" and not creds["user_id"]:
+            creds["user_id"] = value
     missing = [k for k in ("service_token", "cuser_id", "ssecurity") if not creds[k]]
     if missing:
         raise RuntimeError(f"missing cookies: {missing} (hosts seen: "
@@ -166,7 +174,11 @@ def write_config(creds, path=None):
     cfg["service_token"] = creds["service_token"]
     cfg["cuser_id"] = creds["cuser_id"]
     if creds.get("user_id"):
-        cfg.setdefault("user_id", creds["user_id"])
+        cfg["user_id"] = str(creds["user_id"])
+    if creds.get("pass_token"):
+        cfg["pass_token"] = creds["pass_token"]      # 之后可免密续期
+    cfg["session_at"] = int(time.time())
+    cfg["sid"] = cfg.get("sid") or "miothealth"
     with open(path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
     return path

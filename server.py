@@ -112,6 +112,115 @@ def vendor(f):
     return send_from_directory(os.path.join(HERE, "static"), f)
 
 
+# ---------- 登录 / 会话管理 ----------
+CFG_PATH = CFG.get("config_path")
+
+
+def _apply_session(sess):
+    """把新会话写回 config 并热更新 client。"""
+    from login import save_session
+    save_session(CFG_PATH, sess)
+    client.reload_credentials(sess.get("ssecurity"), sess.get("service_token"),
+                              sess.get("cuser_id"))
+    _cache.clear()
+
+
+def _auth_selfheal(cl, why):
+    """401 自愈：优先 passToken 免密续期，其次从 adb 设备导入。"""
+    print(f"[auth] {why} -> self-heal", flush=True)
+    from login import LoginError, refresh_session
+    cfg = load_config(CFG_PATH)
+    if cfg.get("pass_token"):
+        try:
+            sess = refresh_session(cfg, CFG_PATH)
+            cl.reload_credentials(sess["ssecurity"], sess["service_token"], sess["cuser_id"])
+            _cache.clear()
+            print("[auth] refreshed via passToken", flush=True)
+            return True
+        except LoginError as e:
+            print(f"[auth] passToken refresh failed: {e}", flush=True)
+    try:
+        sys.path.insert(0, os.path.join(HERE, "tools"))
+        import refresh_credentials as rc
+        creds = rc.fetch_from_device()
+        rc.write_config(creds, CFG_PATH)
+        cl.reload_credentials(creds["ssecurity"], creds["service_token"], creds["cuser_id"])
+        _cache.clear()
+        print("[auth] refreshed from device", flush=True)
+        return True
+    except Exception as e:
+        print(f"[auth] device import failed: {e}", flush=True)
+        return False
+
+
+client.on_auth_error = _auth_selfheal
+
+
+@app.route("/api/login/status")
+def api_login_status():
+    """会话状态：能否免密续期、上次登录时间、账号 id。"""
+    cfg = load_config(CFG_PATH)
+    return jsonify({"ok": True, "can_refresh": bool(cfg.get("pass_token")),
+                    "session_at": cfg.get("session_at"), "sid": cfg.get("sid") or "miothealth",
+                    "user_id": cfg.get("user_id"), "cuser_id": cfg.get("cuser_id"),
+                    "password_stored": False,
+                    "modes": ["passToken 免密续期", "从 adb 设备导入", "账号密码登录"]})
+
+
+@app.route("/api/login/refresh", methods=["POST"])
+def api_login_refresh():
+    """免密续期（用已保存的 passToken，不需要密码/模拟器）。"""
+    cfg = load_config(CFG_PATH)
+    if not cfg.get("pass_token"):
+        return jsonify({"ok": False, "err": "config 里没有 pass_token：请先账号密码登录或从设备导入"}), 400
+    from login import LoginError, refresh_session
+    try:
+        sess = refresh_session(cfg, CFG_PATH)
+    except LoginError as e:
+        return jsonify({"ok": False, "err": str(e), "code": e.code}), 400
+    _apply_session(sess)
+    return jsonify({"ok": True, "mode": "passToken", "token_prefix": sess["service_token"][:14]})
+
+
+@app.route("/api/login", methods=["POST"])
+def api_login_password():
+    """账号密码登录（首次）。密码仅用于当次请求，不落盘；可能要求验证码。"""
+    body = request.get_json(force=True, silent=True) or {}
+    username, password = body.get("username"), body.get("password")
+    if not (username and password):
+        return jsonify({"ok": False, "err": "需要 username 与 password"}), 400
+    from login import LoginError, login_with_password
+    try:
+        sess = login_with_password(username, password, captcha=body.get("captcha"),
+                                   ick=body.get("ick"))
+    except LoginError as e:
+        return jsonify({"ok": False, "err": str(e), "code": e.code,
+                        "captcha_url": e.captcha_url}), 400
+    if not sess.get("service_token"):
+        return jsonify({"ok": False, "err": "登录成功但未取得 serviceToken（可能需要二次验证）"}), 400
+    _apply_session(sess)
+    return jsonify({"ok": True, "mode": "password",
+                    "pass_token_saved": bool(sess.get("pass_token")),
+                    "token_prefix": sess["service_token"][:14]})
+
+
+@app.route("/api/login/import_device", methods=["POST"])
+def api_login_import_device():
+    """从 adb 设备（已登录的 App）导入会话，含 passToken —— 之后即可免密续期。"""
+    try:
+        sys.path.insert(0, os.path.join(HERE, "tools"))
+        import refresh_credentials as rc
+        creds = rc.fetch_from_device(serial=request.args.get("serial") or None)
+        rc.write_config(creds, CFG_PATH)
+    except Exception as e:
+        return jsonify({"ok": False, "err": str(e)}), 400
+    client.reload_credentials(creds["ssecurity"], creds["service_token"], creds["cuser_id"])
+    _cache.clear()
+    return jsonify({"ok": True, "mode": "device",
+                    "pass_token_saved": bool(creds.get("pass_token")),
+                    "token_prefix": (creds.get("service_token") or "")[:14]})
+
+
 @app.route("/api/health")
 def api_health():
     st = {"ok": True, "mode": "db" if _store else "live",

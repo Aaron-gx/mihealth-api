@@ -67,8 +67,11 @@ CREATE VIEW IF NOT EXISTS v_dedup AS
   FROM dedup;
 """
 
-_DEDUP_REFRESH = """
+_DEDUP_DELETE = """
 DELETE FROM dedup WHERE family=? AND key=? AND ts BETWEEN ? AND ?;
+"""
+
+_DEDUP_INSERT = """
 INSERT INTO dedup(family,key,ts,sid,value,num,zone_offset,zone_name,update_time,watermark)
   SELECT family,key,ts,sid,value,num,zone_offset,zone_name,update_time,watermark FROM (
     SELECT *, ROW_NUMBER() OVER (
@@ -165,7 +168,8 @@ class Store:
                 lo, hi = spans.get((fam, key), (ts, ts))
                 spans[(fam, key)] = (min(lo, ts), max(hi, ts))
             for (fam, key), (lo, hi) in spans.items():
-                self.db.execute(_DEDUP_REFRESH, (fam, key, lo, hi, fam, key, lo, hi))
+                self.db.execute(_DEDUP_DELETE, (fam, key, lo, hi))
+                self.db.execute(_DEDUP_INSERT, (fam, key, lo, hi))
             self.db.commit()
         return len(rows)
 

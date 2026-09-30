@@ -76,7 +76,31 @@ python tools/export_all.py                # 全量导出 JSON（不落库）
 
 数据库表：`records`（原始行，主键 `family+key+sid+ts`）、`v_dedup`（去重视图）、`sync_state`（游标）。
 
-## 凭据提取
+## 登录 / 会话（三种方式）
+
+网页看板右上角 **登录** 按钮提供三条路径，都不需要每次都碰模拟器：
+
+| 方式 | 说明 | 何时用 |
+|---|---|---|
+| **账号密码登录** | 用小米账号（手机号/邮箱/ID）+ 密码走 passport 登录，成功后保存 `passToken`。密码只用于当次请求、**不落盘**；可能弹验证码（面板会显示图片） | 首次接入 |
+| **免密续期** | 用已保存的 `passToken` 换新 `serviceToken`，不需要密码/设备。passToken 有效期约 1~2 个月，可反复续期 | 日常（token 过期时自动触发） |
+| **从设备导入** | 从已登录 App 的 rooted 设备/模拟器读取会话（含 `passToken`），一条命令完成 | 手上已有登录态 |
+
+登完一次之后，`server.py` / `sync.py` 在收到 401 时会**自动免密续期并重试**，
+实测链路：坏 token → `401 -> refreshed via passToken` → 写回新会话 → 数据正常。
+
+命令行等价：
+
+```bash
+python login.py --user <小米账号> --password <密码>   # 首次（密码不留存）
+python login.py --refresh                            # 之后免密续期
+python tools/refresh_credentials.py                  # 从设备导入（含 passToken）
+```
+
+> 落盘内容只有 `ssecurity / service_token / cuser_id / user_id / pass_token / session_at`（`config.json`，权限 600）。
+> 注意 `ssecurity` **每次会话都会变**，必须与同次会话的 token 配套使用。
+
+### 备用：手动提取
 
 在已登录小米账号的 rooted 设备/模拟器上：
 
